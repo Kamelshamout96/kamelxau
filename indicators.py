@@ -60,5 +60,73 @@ def add_all_indicators(df: pd.DataFrame) -> pd.DataFrame:
     # "Kumo" proxy using EMAs (structure only)
     df["kumo_top"] = df["ema50"]
     df["kumo_bottom"] = df["ema200"]
+    
+    # SuperTrend Indicator (period=10, multiplier=3)
+    # SuperTrend is a trend-following indicator based on ATR
+    df = add_supertrend(df, period=10, multiplier=3)
 
     return df.dropna()
+
+
+def add_supertrend(df, period=10, multiplier=3):
+    """
+    Calculate SuperTrend indicator
+    Returns a dataframe with:
+    - supertrend: The SuperTrend line value
+    - supertrend_direction: 1 for uptrend (bullish), -1 for downtrend (bearish)
+    """
+    df = df.copy()
+    
+    # Calculate ATR if not already present
+    if 'atr' not in df.columns:
+        atr = ta.volatility.AverageTrueRange(
+            high=df["high"], low=df["low"], close=df["close"], window=period
+        )
+        df['atr'] = atr.average_true_range()
+    
+    # Calculate basic bands
+    hl_avg = (df['high'] + df['low']) / 2
+    
+    # Upper and lower basic bands
+    upper_band = hl_avg + (multiplier * df['atr'])
+    lower_band = hl_avg - (multiplier * df['atr'])
+    
+    # Initialize SuperTrend columns
+    supertrend = [0] * len(df)
+    direction = [1] * len(df)  # 1 = bullish, -1 = bearish
+    
+    # Calculate SuperTrend
+    for i in range(period, len(df)):
+        # Current values
+        curr_close = df['close'].iloc[i]
+        prev_close = df['close'].iloc[i-1]
+        
+        # Adjust bands based on previous values
+        if i == period:
+            final_upper = upper_band.iloc[i]
+            final_lower = lower_band.iloc[i]
+        else:
+            # Upper band
+            if upper_band.iloc[i] < supertrend[i-1] or prev_close > supertrend[i-1]:
+                final_upper = upper_band.iloc[i]
+            else:
+                final_upper = supertrend[i-1]
+            
+            # Lower band
+            if lower_band.iloc[i] > supertrend[i-1] or prev_close < supertrend[i-1]:
+                final_lower = lower_band.iloc[i]
+            else:
+                final_lower = supertrend[i-1]
+        
+        # Determine SuperTrend value and direction
+        if curr_close <= final_upper:
+            supertrend[i] = final_upper
+            direction[i] = -1  # Bearish
+        else:
+            supertrend[i] = final_lower
+            direction[i] = 1   # Bullish
+    
+    df['supertrend'] = supertrend
+    df['supertrend_direction'] = direction
+    
+    return df

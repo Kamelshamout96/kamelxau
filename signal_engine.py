@@ -133,3 +133,70 @@ def check_entry(df_5m, df_15m, df_1h, df_4h):
         "reason": f"Waiting for entry. Trend is {main_trend} but not enough indicators aligned.",
         "market_status": status_msg
     }
+
+
+def check_supertrend_entry(df_5m, df_15m, df_1h, df_4h):
+    """
+    SuperTrend-only signals (⭐ Simple & Fast)
+    
+    Logic:
+    - Uses SuperTrend indicator on multiple timeframes
+    - BUY when price is above SuperTrend (direction = 1)
+    - SELL when price is below SuperTrend (direction = -1)
+    - Requires alignment across 15m, 1H, and 4H
+    """
+    last5 = df_5m.iloc[-1]
+    last15 = df_15m.iloc[-1]
+    last1h = df_1h.iloc[-1]
+    last4h = df_4h.iloc[-1]
+    
+    # Check if SuperTrend columns exist
+    if 'supertrend_direction' not in last5.index:
+        return {
+            "action": "NO_TRADE",
+            "reason": "SuperTrend indicator not calculated",
+            "signal_type": "SUPERTREND"
+        }
+    
+    # Get SuperTrend directions
+    st_5m = last5['supertrend_direction']
+    st_15m = last15['supertrend_direction']
+    st_1h = last1h['supertrend_direction']
+    st_4h = last4h['supertrend_direction']
+    
+    status_msg = f"SuperTrend: 4H={'🟢' if st_4h == 1 else '🔴'}, 1H={'🟢' if st_1h == 1 else '🔴'}, 15m={'🟢' if st_15m == 1 else '🔴'}, 5m={'🟢' if st_5m == 1 else '🔴'}"
+    
+    # BUY Signal: All higher timeframes bullish (direction = 1)
+    if st_4h == 1 and st_1h == 1 and st_15m == 1 and st_5m == 1:
+        return {
+            "action": "BUY",
+            "confidence": "SUPERTREND",
+            "confidence_emoji": "⭐",
+            "signal_type": "SUPERTREND",
+            "entry": float(last5["close"]),
+            "sl": float(last5["supertrend"]),  # SuperTrend line as SL
+            "tp": float(last5["close"] + 2 * abs(last5["close"] - last5["supertrend"])),  # 1:2 R:R
+            "timeframe": "5m",
+            "market_status": status_msg
+        }
+    
+    # SELL Signal: All higher timeframes bearish (direction = -1)
+    if st_4h == -1 and st_1h == -1 and st_15m == -1 and st_5m == -1:
+        return {
+            "action": "SELL",
+            "confidence": "SUPERTREND",
+            "confidence_emoji": "⭐",
+            "signal_type": "SUPERTREND",
+            "entry": float(last5["close"]),
+            "sl": float(last5["supertrend"]),  # SuperTrend line as SL
+            "tp": float(last5["close"] - 2 * abs(last5["close"] - last5["supertrend"])),  # 1:2 R:R
+            "timeframe": "5m",
+            "market_status": status_msg
+        }
+    
+    return {
+        "action": "NO_TRADE",
+        "reason": "SuperTrend signals not aligned across timeframes",
+        "market_status": status_msg,
+        "signal_type": "SUPERTREND"
+    }

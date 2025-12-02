@@ -9,7 +9,7 @@ from utils import (
     DataError
 )
 from indicators import add_all_indicators
-from signal_engine import check_entry
+from signal_engine import check_entry, check_supertrend_entry
 
 
 app = FastAPI()
@@ -62,18 +62,36 @@ def run_signal():
         df_1h = add_all_indicators(candles_1h)
         df_4h = add_all_indicators(candles_4h)
 
-        # 4) الإشارة
+        # 4) الإشارة - Check both regular and SuperTrend
         signal = check_entry(df_5m, df_15m, df_1h, df_4h)
+        
+        # If no regular signal, check SuperTrend
+        if signal.get("action") == "NO_TRADE":
+            supertrend_signal = check_supertrend_entry(df_5m, df_15m, df_1h, df_4h)
+            if supertrend_signal.get("action") in ("BUY", "SELL"):
+                signal = supertrend_signal
 
         # 5) تنبيه تيليجرام
         if signal.get("action") in ("BUY", "SELL"):
             action_emoji = "🟢 BUY" if signal["action"] == "BUY" else "🔴 SELL"
             confidence = signal.get("confidence", "UNKNOWN")
             confidence_emoji = signal.get("confidence_emoji", "")
+            signal_type = signal.get("signal_type", "REGULAR")
+            
+            # Customize message based on signal type
+            if signal_type == "SUPERTREND":
+                confidence_text = "⭐ SuperTrend Signal (Simple & Fast)"
+                title = f"{action_emoji} XAUUSD - SuperTrend"
+            elif confidence == "HIGH":
+                confidence_text = "⭐⭐⭐ Most Accurate"
+                title = f"{action_emoji} XAUUSD Signal"
+            else:
+                confidence_text = "⭐⭐ Less Accurate"
+                title = f"{action_emoji} XAUUSD Signal"
             
             msg = (
                 f"<b>═══════════════════</b>\n"
-                f"<b>{action_emoji} XAUUSD Signal</b>\n"
+                f"<b>{title}</b>\n"
                 f"<b>═══════════════════</b>\n\n"
                 f"🎯 <b>Confidence:</b> {confidence} {confidence_emoji}\n"
                 f"📊 <b>Timeframe:</b> {signal['timeframe']}\n"
@@ -81,7 +99,7 @@ def run_signal():
                 f"💰 <b>Entry Price:</b> {signal['entry']:.2f}\n"
                 f"🛑 <b>Stop Loss (SL):</b> {signal['sl']:.2f}\n"
                 f"🎯 <b>Take Profit (TP):</b> {signal['tp']:.2f}\n\n"
-                f"<i>{'⭐⭐⭐ Most Accurate' if confidence == 'HIGH' else '⭐⭐ Less Accurate'}</i>\n"
+                f"<i>{confidence_text}</i>\n"
                 f"<b>═══════════════════</b>"
             )
             send_telegram(TG_TOKEN, TG_CHAT, msg)
