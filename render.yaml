@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: xauusd-goldapi-bot
+    name: xauusd-alpha-bot
     env: python
     plan: free
     buildCommand: pip install -r requirements.txt

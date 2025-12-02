@@ -2,7 +2,9 @@ import ta
 import pandas as pd
 
 def add_all_indicators(df: pd.DataFrame) -> pd.DataFrame:
-    # Expects columns: open, high, low, close, volume, index is datetime
+    """Adds EMA50/200, RSI, Stoch, MACD, ADX, ATR, Donchian, and kumo proxy.
+    Expects index=datetime and columns: open, high, low, close, volume.
+    """
     df = df.copy()
 
     # EMAs
@@ -45,7 +47,7 @@ def add_all_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df["don_high"] = df["high"].rolling(window=20).max()
     df["don_low"] = df["low"].rolling(window=20).min()
 
-    # "Kumo" proxy using EMAs (just for structure)
+    # "Kumo" proxy using EMAs (structure only)
     df["kumo_top"] = df["ema50"]
     df["kumo_bottom"] = df["ema200"]
 

@@ -14,7 +14,7 @@ from utils import (
 
 app = FastAPI()
 
-GOLDAPI_KEY = os.getenv("GOLDAPI_KEY")
+ALPHA_KEY = os.getenv("ALPHA_KEY")
 TG_TOKEN = os.getenv("TG_TOKEN")
 TG_CHAT = os.getenv("TG_CHAT")
 
@@ -22,8 +22,8 @@ TG_CHAT = os.getenv("TG_CHAT")
 @app.get("/run-signal")
 def run_signal():
     try:
-        # 1) Update local tick history from GoldAPI (XAU/USD spot)
-        hist = update_history(GOLDAPI_KEY)
+        # 1) Update local tick history from AlphaVantage (XAU/USD mid-price)
+        hist = update_history(ALPHA_KEY)
 
         # 2) Build multi-timeframe candles from that history
         candles_5m = history_to_candles(hist, "5T")
