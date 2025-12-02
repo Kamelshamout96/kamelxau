@@ -22,7 +22,7 @@ TG_CHAT = os.getenv("TG_CHAT")
 @app.get("/run-signal")
 def run_signal():
     try:
-        # 1) Update local tick history from GoldAPI
+        # 1) Update local tick history from GoldAPI (XAU/USD spot)
         hist = update_history(GOLDAPI_KEY)
 
         # 2) Build multi-timeframe candles from that history
@@ -43,7 +43,7 @@ def run_signal():
         # 5) Notify on Telegram if trade
         if signal.get("action") in ("BUY", "SELL"):
             msg = (
-                f"🔥 XAUUSD {signal['action']} ({signal.get('timeframe','5m')})\n"
+                f"XAUUSD {signal['action']} ({signal.get('timeframe','5m')})\n"
                 f"Entry: {signal['entry']:.2f}\n"
                 f"SL   : {signal['sl']:.2f}\n"
                 f"TP   : {signal['tp']:.2f}"
@@ -53,11 +53,9 @@ def run_signal():
         return signal
 
     except DataError as e:
-        # Controlled data/API problem
         return JSONResponse(
             status_code=502,
             content={"error": "data_error", "detail": str(e)},
         )
     except Exception as e:
-        # Unexpected error
         raise HTTPException(status_code=500, detail=str(e))

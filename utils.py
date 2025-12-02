@@ -1,5 +1,4 @@
 import os
-import json
 from pathlib import Path
 from typing import Tuple
 
@@ -20,20 +19,22 @@ def fetch_spot_from_goldapi(api_key: str) -> Tuple[pd.Timestamp, float]:
     if not api_key:
         raise DataError("GOLDAPI_KEY is not set")
 
-    url = f"https://app.goldapi.net/price/XAU/USD?access_key={api_key}"
-    resp = requests.get(url, timeout=10)
+    url = "https://www.goldapi.io/api/XAU/USD"
+    headers = {
+        "x-access-token": api_key,
+        "Content-Type": "application/json",
+    }
+    resp = requests.get(url, headers=headers, timeout=10)
     try:
         data = resp.json()
     except Exception:
         raise DataError(f"GoldAPI invalid response: HTTP {resp.status_code}")
 
     if "price" not in data:
-        # Pass upstream error message if available
         msg = data.get("error") or data.get("message") or str(data)
         raise DataError(f"GoldAPI error: {msg}")
 
     price = float(data["price"])
-    # use timestamp if present, otherwise 'date'
     if "timestamp" in data:
         ts = pd.to_datetime(data["timestamp"], unit="s", utc=True)
     else:
@@ -63,8 +64,9 @@ def update_history(api_key: str) -> pd.DataFrame:
     ts, price = fetch_spot_from_goldapi(api_key)
     df = load_history()
     df.loc[ts] = price
-    # keep last 7 days max to avoid huge file
-    df = df[df.index >= (df.index.max() - pd.Timedelta(days=7))]
+    if not df.empty:
+        max_ts = df.index.max()
+        df = df[df.index >= (max_ts - pd.Timedelta(days=7))]
     save_history(df)
     return df
 
@@ -72,7 +74,6 @@ def update_history(api_key: str) -> pd.DataFrame:
 def history_to_candles(df: pd.DataFrame, rule: str) -> pd.DataFrame:
     if df.empty or len(df) < 30:
         raise DataError("Not enough history collected yet")
-    # df index: timestamp, column: price
     ohlc = df["price"].resample(rule).ohlc().dropna()
     ohlc["volume"] = 100.0
     ohlc.index = pd.to_datetime(ohlc.index, utc=True)
