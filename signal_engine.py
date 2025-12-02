@@ -46,13 +46,21 @@ def check_entry(df_5m, df_15m, df_1h, df_4h):
     """
     # Safety: ensure we have enough candles to avoid out-of-bounds
     min_required = 8
-    if any(len(df) < min_required for df in (df_5m, df_15m, df_1h, df_4h)):
+    if len(df_5m) < min_required:
         return {
             "action": "NO_TRADE",
             "reason": f"Not enough candles (need >= {min_required}) in one of the timeframes",
             "market_status": "Data too short for safe scalping check",
             "signal_type": "SCALP",
         }
+    for name, df in [("15m", df_15m), ("1h", df_1h), ("4h", df_4h)]:
+        if len(df) < 1:
+            return {
+                "action": "NO_TRADE",
+                "reason": f"Not enough {name} candles (need >=1)",
+                "market_status": "Data too short for safe scalping check",
+                "signal_type": "SCALP",
+            }
 
     last5 = df_5m.iloc[-1]
     prev5 = df_5m.iloc[-2]

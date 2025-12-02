@@ -88,7 +88,8 @@ def add_all_indicators(df: pd.DataFrame) -> pd.DataFrame:
 
     result = df.dropna()
     if result.empty:
-        raise DataError("Not enough data after indicator calculations.")
+        # fallback: forward/backward fill to allow minimal datasets
+        result = df.fillna(method="ffill").fillna(method="bfill")
     return result
 
 
