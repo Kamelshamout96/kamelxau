@@ -1,0 +1,6 @@
+fastapi
+uvicorn
+pandas
+pandas_ta
+requests
+python-telegram-bot==13.15
