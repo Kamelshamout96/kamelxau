@@ -58,9 +58,14 @@ def fetch_spot_from_goldapi(api_key: str) -> Tuple[pd.Timestamp, float]:
 def load_history() -> pd.DataFrame:
     if DATA_FILE.exists():
         df = pd.read_csv(DATA_FILE)
-        df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
 
-        # sort + remove duplicates to avoid negative dimension
+        # دعم لكل أنواع الـ timestamps
+        df["timestamp"] = pd.to_datetime(
+            df["timestamp"],
+            utc=True,
+            format="mixed"
+        )
+
         df = df.set_index("timestamp").sort_index()
         df = df[~df.index.duplicated(keep="last")]
 
@@ -118,7 +123,12 @@ def history_to_candles(df: pd.DataFrame, rule: str) -> pd.DataFrame:
         raise DataError(f"Resample failed: {str(e)}")
 
     ohlc["volume"] = 100.0
-    ohlc.index = pd.to_datetime(ohlc.index, utc=True)
+
+    ohlc.index = pd.to_datetime(
+        ohlc.index,
+        utc=True,
+        format="mixed"
+    )
 
     return ohlc
 
