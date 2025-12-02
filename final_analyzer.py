@@ -18,10 +18,10 @@ from signal_engine import check_entry, check_supertrend_entry
 from utils import DataError
 
 TIMEFRAMES = [
-    ("5m", "5T"),
-    ("15m", "15T"),
-    ("1h", "60T"),
-    ("4h", "240T"),
+    ("5m", "5min"),
+    ("15m", "15min"),
+    ("1h", "60min"),
+    ("4h", "240min"),
 ]
 
 

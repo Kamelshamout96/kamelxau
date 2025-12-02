@@ -77,6 +77,20 @@ def health():
     }
 
 
+@app.get("/live-length")
+def live_length():
+    """Return count and time range of collected 1m live data."""
+    try:
+        df = get_live_collected_data()
+        return {
+            "count": int(len(df)),
+            "first": df.index[0].isoformat(),
+            "last": df.index[-1].isoformat(),
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
 
 @app.get("/run-signal")
 def run_signal():
@@ -88,10 +102,10 @@ def run_signal():
         hist = get_live_collected_data()
 
         # Build higher timeframes
-        candles_5m = build_timeframe_candles(hist, "5T")
-        candles_15m = build_timeframe_candles(hist, "15T")
-        candles_1h = build_timeframe_candles(hist, "60T")
-        candles_4h = build_timeframe_candles(hist, "240T")
+        candles_5m = build_timeframe_candles(hist, "5min")
+        candles_15m = build_timeframe_candles(hist, "15min")
+        candles_1h = build_timeframe_candles(hist, "60min")
+        candles_4h = build_timeframe_candles(hist, "240min")
 
         # Calculate indicators
         df_5m = add_all_indicators(candles_5m)
@@ -136,4 +150,11 @@ def run_signal():
         )
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        import traceback
+        raise HTTPException(
+            status_code=500,
+            detail=traceback.format_exc()
+        )
+
+    # except Exception as e:
+    #     raise HTTPException(status_code=500, detail=str(e))

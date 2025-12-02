@@ -31,10 +31,10 @@ def analyze_live_data():
         # 2) Build multi-timeframe candles
         print("\n📊 Step 2: Building multi-timeframe candles...")
         
-        candles_5m = build_timeframe_candles(df_1m, "5T")
-        candles_15m = build_timeframe_candles(df_1m, "15T")
-        candles_1h = build_timeframe_candles(df_1m, "60T")
-        candles_4h = build_timeframe_candles(df_1m, "240T")
+        candles_5m = build_timeframe_candles(df_1m, "5min")
+        candles_15m = build_timeframe_candles(df_1m, "15min")
+        candles_1h = build_timeframe_candles(df_1m, "60min")
+        candles_4h = build_timeframe_candles(df_1m, "240min")
         
         print(f"  ✓ 5-minute: {len(candles_5m)} candles")
         print(f"  ✓ 15-minute: {len(candles_15m)} candles")

@@ -95,10 +95,14 @@ def build_timeframe_candles(df_1m, timeframe):
     
     Args:
         df_1m: DataFrame with 1-minute candles
-        timeframe: '5T', '15T', '60T', '240T', '1D'
+        timeframe: '5min', '15min', '60min', '240min', '1D'
     """
     if len(df_1m) < 10:
         raise DataError(f"Not enough 1m data: {len(df_1m)} rows")
+    
+    # normalize deprecated alias
+    if isinstance(timeframe, str) and timeframe.endswith("T"):
+        timeframe = timeframe[:-1] + "min"
     
     # Resample to desired timeframe
     candles = df_1m.resample(timeframe).agg({
@@ -108,7 +112,7 @@ def build_timeframe_candles(df_1m, timeframe):
         'close': 'last',
         'volume': 'sum'
     }).dropna()
-    
+
     return candles
 
 
@@ -172,8 +176,8 @@ def get_collection_stats():
         
         # Calculate how many candles we can build for each timeframe
         print("\nTimeframe candles available:")
-        for tf_name, tf_rule in [("5-minute", "5T"), ("15-minute", "15T"), 
-                                   ("1-hour", "60T"), ("4-hour", "240T"), ("Daily", "1D")]:
+        for tf_name, tf_rule in [("5-minute", "5min"), ("15-minute", "15min"), 
+                                   ("1-hour", "60min"), ("4-hour", "240min"), ("Daily", "1D")]:
             try:
                 candles = build_timeframe_candles(df, tf_rule)
                 print(f"  {tf_name}: {len(candles)} candles")

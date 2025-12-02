@@ -73,10 +73,10 @@ def analyze_pure():
         # 2) Build multi-timeframe candles
         print("\n📊 Step 2: Building timeframe candles...")
         
-        candles_5m = build_candles_pure(df_1m, "5T")
-        candles_15m = build_candles_pure(df_1m, "15T")
-        candles_1h = build_candles_pure(df_1m, "60T")
-        candles_4h = build_candles_pure(df_1m, "240T")
+        candles_5m = build_candles_pure(df_1m, "5min")
+        candles_15m = build_candles_pure(df_1m, "15min")
+        candles_1h = build_candles_pure(df_1m, "60min")
+        candles_4h = build_candles_pure(df_1m, "240min")
         
         print(f"  ✅ 5m:  {len(candles_5m):3d} candles")
         print(f"  ✅ 15m: {len(candles_15m):3d} candles")
