@@ -59,8 +59,8 @@ def check_entry(df_5m, df_15m, df_1h, df_4h):
                 "confidence": "HIGH",
                 "confidence_emoji": "⭐⭐⭐",
                 "entry": float(last5["close"]),
-                "sl": float(last5["close"] - 1.5 * last5["atr"]),
-                "tp": float(last5["close"] + 3 * last5["atr"]),
+                "sl": float(last5["close"] - 0.8 * last5["atr"]),
+                "tp": float(last5["close"] + 1.5 * last5["atr"]),
                 "timeframe": "5m",
                 "market_status": status_msg
             }
@@ -81,8 +81,8 @@ def check_entry(df_5m, df_15m, df_1h, df_4h):
                 "confidence": "MEDIUM",
                 "confidence_emoji": "⭐⭐",
                 "entry": float(last5["close"]),
-                "sl": float(last5["close"] - 1.5 * last5["atr"]),
-                "tp": float(last5["close"] + 3 * last5["atr"]),
+                "sl": float(last5["close"] - 0.8 * last5["atr"]),
+                "tp": float(last5["close"] + 1.5 * last5["atr"]),
                 "timeframe": "5m",
                 "market_status": status_msg
             }
@@ -101,8 +101,8 @@ def check_entry(df_5m, df_15m, df_1h, df_4h):
                 "confidence": "HIGH",
                 "confidence_emoji": "⭐⭐⭐",
                 "entry": float(last5["close"]),
-                "sl": float(last5["close"] + 1.5 * last5["atr"]),
-                "tp": float(last5["close"] - 3 * last5["atr"]),
+                "sl": float(last5["close"] + 0.8 * last5["atr"]),
+                "tp": float(last5["close"] - 1.5 * last5["atr"]),
                 "timeframe": "5m",
                 "market_status": status_msg
             }
@@ -122,8 +122,8 @@ def check_entry(df_5m, df_15m, df_1h, df_4h):
                 "confidence": "MEDIUM",
                 "confidence_emoji": "⭐⭐",
                 "entry": float(last5["close"]),
-                "sl": float(last5["close"] + 1.5 * last5["atr"]),
-                "tp": float(last5["close"] - 3 * last5["atr"]),
+                "sl": float(last5["close"] + 0.8 * last5["atr"]),
+                "tp": float(last5["close"] - 1.5 * last5["atr"]),
                 "timeframe": "5m",
                 "market_status": status_msg
             }
@@ -174,8 +174,8 @@ def check_supertrend_entry(df_5m, df_15m, df_1h, df_4h):
             "confidence_emoji": "⭐",
             "signal_type": "SUPERTREND",
             "entry": float(last5["close"]),
-            "sl": float(last5["supertrend"]),  # SuperTrend line as SL
-            "tp": float(last5["close"] + 2 * abs(last5["close"] - last5["supertrend"])),  # 1:2 R:R
+            "sl": float(last5["close"] - 0.8 * last5["atr"]),  # Tighter SL for faster trades (~30-40 pips)
+            "tp": float(last5["close"] + 1.5 * last5["atr"]),  # Smaller TP for quick profit (~60-80 pips)
             "timeframe": "5m",
             "market_status": status_msg
         }
@@ -188,8 +188,8 @@ def check_supertrend_entry(df_5m, df_15m, df_1h, df_4h):
             "confidence_emoji": "⭐",
             "signal_type": "SUPERTREND",
             "entry": float(last5["close"]),
-            "sl": float(last5["supertrend"]),  # SuperTrend line as SL
-            "tp": float(last5["close"] - 2 * abs(last5["close"] - last5["supertrend"])),  # 1:2 R:R
+            "sl": float(last5["close"] + 0.8 * last5["atr"]),  # Tighter SL for faster trades (~30-40 pips)
+            "tp": float(last5["close"] - 1.5 * last5["atr"]),  # Smaller TP for quick profit (~60-80 pips)
             "timeframe": "5m",
             "market_status": status_msg
         }
