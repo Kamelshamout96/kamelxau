@@ -30,8 +30,8 @@ pip install -r requirements.txt
 ### 2. Set Environment Variables (Optional for Telegram)
 ```bash
 # Windows PowerShell
-$env:TG_TOKEN="your_telegram_bot_token"
-$env:TG_CHAT="your_chat_id"
+$env:TG_TOKEN="8512147987:AAEhK8u7a_apAENZgo4V5rP6x9vcm_OClHk"
+$env:TG_CHAT="5326666507"
 
 # Linux/Mac
 export TG_TOKEN="your_telegram_bot_token"

@@ -17,6 +17,42 @@ class DataError(Exception):
     pass
 
 
+def clean_yf_data(df):
+    """Helper to clean Yahoo Finance data columns and timezone"""
+    if df.empty:
+        return df
+        
+    # Handle MultiIndex columns (Price, Ticker)
+    if isinstance(df.columns, pd.MultiIndex):
+        found_price_level = False
+        for i in range(df.columns.nlevels):
+            level_values = df.columns.get_level_values(i)
+            if "Close" in level_values:
+                df.columns = level_values
+                found_price_level = True
+                break
+        
+        if not found_price_level:
+            df.columns = df.columns.droplevel(0)
+            
+    df.columns = [col.lower() for col in df.columns]
+    
+    # Ensure required columns
+    required = ["open", "high", "low", "close", "volume"]
+    if not all(col in df.columns for col in required):
+        if "volume" not in df.columns:
+            df["volume"] = 0
+            
+    df = df[["open", "high", "low", "close", "volume"]]
+    
+    # Convert to local time (UTC+3)
+    if df.index.tz is not None:
+        df.index = df.index.tz_convert("Etc/GMT-3")
+        df.index = df.index.tz_localize(None)
+        
+    return df
+
+
 def fetch_gold_historical_data(period="30d", interval="1h"):
     """
     Fetch historical gold data using yf.download() which is more robust
@@ -27,8 +63,8 @@ def fetch_gold_historical_data(period="30d", interval="1h"):
     
     # Try multiple tickers
     tickers = [
-        ("GC=F", "Gold Futures"),
         ("XAUUSD=X", "Gold Spot"),
+        ("GC=F", "Gold Futures"),
     ]
     
     last_error = None
@@ -51,38 +87,52 @@ def fetch_gold_historical_data(period="30d", interval="1h"):
                 if not hist.empty and len(hist) > 100:
                     print(f"✓ Successfully fetched {len(hist)} rows from {ticker_name}")
                     
-                    # Clean up data
-                    # yf.download might return MultiIndex columns.
-                    # Recent versions often return (Price, Ticker) -> Level 0 is Price.
-                    # Older versions or different settings might return (Ticker, Price) -> Level 1 is Price.
-                    if isinstance(hist.columns, pd.MultiIndex):
-                        # Try to find the level containing 'Close'
-                        found_price_level = False
-                        for i in range(hist.columns.nlevels):
-                            level_values = hist.columns.get_level_values(i)
-                            if "Close" in level_values:
-                                hist.columns = level_values
-                                found_price_level = True
-                                break
-                        
-                        # Fallback if 'Close' not found (unlikely)
-                        if not found_price_level:
-                            hist.columns = hist.columns.droplevel(0)
-                        
-                    hist.columns = [col.lower() for col in hist.columns]
+                    # Clean main historical data
+                    hist = clean_yf_data(hist)
                     
-                    # Ensure we have required columns
-                    required = ["open", "high", "low", "close", "volume"]
-                    if not all(col in hist.columns for col in required):
-                        # Sometimes volume is missing for forex/spot
-                        if "volume" not in hist.columns:
-                            hist["volume"] = 0
+                    # PATCH: Fetch latest 1m data to ensure real-time accuracy for the last candle
+                    # Only do this if we are fetching 1h data (standard operation)
+                    if interval == "1h":
+                        try:
+                            print(f"  Fetching real-time 1m data from {ticker_name} to patch latest candle...")
+                            rt_data = yf.download(
+                                tickers=ticker_symbol,
+                                period="1d",
+                                interval="1m",
+                                progress=False,
+                                timeout=10,
+                                auto_adjust=True
+                            )
+                            
+                            if not rt_data.empty:
+                                rt_data = clean_yf_data(rt_data)
+                                
+                                # Resample 1m to 1h to get the latest incomplete candle(s) correctly formed
+                                rt_1h = rt_data.resample("1h").agg({
+                                    'open': 'first',
+                                    'high': 'max',
+                                    'low': 'min',
+                                    'close': 'last',
+                                    'volume': 'sum'
+                                }).dropna()
+                                
+                                if not rt_1h.empty:
+                                    # Update hist with rt_1h
+                                    # Remove overlapping rows from hist
+                                    hist = hist[~hist.index.isin(rt_1h.index)]
+                                    # Append new/updated rows
+                                    hist = pd.concat([hist, rt_1h]).sort_index()
+                                    print(f"  ✓ Patched with real-time data. Latest candle: {hist.index[-1]}")
+                                    
+                        except Exception as e:
+                            print(f"  ⚠ Real-time patch warning: {e}")
                     
-                    hist = hist[["open", "high", "low", "close", "volume"]]
-                    
-                    # Remove timezone info
-                    if hist.index.tz is not None:
-                        hist.index = hist.index.tz_localize(None)
+                    # Check freshness
+                    last_time = hist.index[-1]
+                    # Allow up to 70 minutes lag (to account for just started hour)
+                    if datetime.now() - last_time > timedelta(minutes=70):
+                         print(f"⚠ {ticker_name} data is stale (Last: {last_time}). Trying next ticker...")
+                         continue
                     
                     return hist
                 
