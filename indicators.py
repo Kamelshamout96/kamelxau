@@ -5,17 +5,27 @@ def add_all_indicators(df: pd.DataFrame) -> pd.DataFrame:
     """Adds EMA50/200, RSI, Stoch, MACD, ADX, ATR, Donchian, and kumo proxy.
     Expects index=datetime and columns: open, high, low, close, volume.
     """
+    # Validate we have enough data
+    if len(df) < 250:
+        raise ValueError(f"Insufficient data for indicators: {len(df)} rows (need at least 250)")
+    
+    # Check required columns
+    required_cols = ["open", "high", "low", "close", "volume"]
+    missing = [col for col in required_cols if col not in df.columns]
+    if missing:
+        raise ValueError(f"Missing required columns: {missing}")
+    
     df = df.copy()
 
-    # EMAs
+    # EMAs (need 200+ periods)
     df["ema50"] = ta.trend.EMAIndicator(close=df["close"], window=50).ema_indicator()
     df["ema200"] = ta.trend.EMAIndicator(close=df["close"], window=200).ema_indicator()
 
-    # RSI
+    # RSI (needs 14 periods)
     rsi = ta.momentum.RSIIndicator(close=df["close"], window=14)
     df["rsi"] = rsi.rsi()
 
-    # Stochastic
+    # Stochastic (needs 14 periods)
     stoch = ta.momentum.StochasticOscillator(
         high=df["high"],
         low=df["low"],
@@ -31,21 +41,21 @@ def add_all_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df["macd"] = macd.macd()
     df["macd_signal"] = macd.macd_signal()
 
-    # ADX
+    # ADX (needs 14 periods)
     adx = ta.trend.ADXIndicator(
         high=df["high"], low=df["low"], close=df["close"], window=14
     )
     df["adx"] = adx.adx()
 
-    # ATR
+    # ATR (needs 14 periods)
     atr = ta.volatility.AverageTrueRange(
         high=df["high"], low=df["low"], close=df["close"], window=14
     )
     df["atr"] = atr.average_true_range()
 
-    # Donchian (20-period high/low)
-    df["don_high"] = df["high"].rolling(window=20).max()
-    df["don_low"] = df["low"].rolling(window=20).min()
+    # Donchian (needs 20 periods)
+    df["don_high"] = df["high"].rolling(window=20, min_periods=20).max()
+    df["don_low"] = df["low"].rolling(window=20, min_periods=20).min()
 
     # "Kumo" proxy using EMAs (structure only)
     df["kumo_top"] = df["ema50"]
