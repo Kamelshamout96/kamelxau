@@ -24,7 +24,7 @@ def fetch_spot_from_goldapi(api_key: str) -> Tuple[pd.Timestamp, float]:
         "x-access-token": api_key,
         "Content-Type": "application/json",
     }
-    resp = requests.get(url, headers=headers, timeout=10)
+    resp = requests.get(url, headers=headers, timeout=120)
     try:
         data = resp.json()
     except Exception:
