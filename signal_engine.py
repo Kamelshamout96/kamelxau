@@ -19,16 +19,27 @@ def check_entry(df_5m, df_15m, df_1h, df_4h):
 
     trend_1h = _trend(last1h)
     trend_4h = _trend(last4h)
+    mid_trend = _trend(last15)
+
+    # Construct a market status summary
+    status_msg = f"Trend: 4H={trend_4h}, 1H={trend_1h}, 15m={mid_trend}"
 
     if trend_1h != trend_4h or trend_1h == "neutral":
-        return {"action": "NO_TRADE", "reason": "HTF mismatch or neutral"}
+        return {
+            "action": "NO_TRADE", 
+            "reason": f"HTF Mismatch: 4H is {trend_4h}, 1H is {trend_1h}",
+            "market_status": status_msg
+        }
 
     main_trend = trend_1h
 
     # extra confirmation from 15m
-    mid_trend = _trend(last15)
     if mid_trend != main_trend:
-        return {"action": "NO_TRADE", "reason": "15m disagrees with HTF"}
+        return {
+            "action": "NO_TRADE", 
+            "reason": f"15m Divergence: 15m is {mid_trend} while HTF is {main_trend}",
+            "market_status": status_msg
+        }
 
     # BUY setup
     if main_trend == "bullish":
@@ -45,6 +56,7 @@ def check_entry(df_5m, df_15m, df_1h, df_4h):
                 "sl": float(last5["close"] - 1.5 * last5["atr"]),
                 "tp": float(last5["close"] + 3 * last5["atr"]),
                 "timeframe": "5m",
+                "market_status": status_msg
             }
 
     # SELL setup
@@ -62,6 +74,11 @@ def check_entry(df_5m, df_15m, df_1h, df_4h):
                 "sl": float(last5["close"] + 1.5 * last5["atr"]),
                 "tp": float(last5["close"] - 3 * last5["atr"]),
                 "timeframe": "5m",
+                "market_status": status_msg
             }
 
-    return {"action": "NO_TRADE", "reason": "No confluence on 5m"}
+    return {
+        "action": "NO_TRADE", 
+        "reason": f"Waiting for 5m entry. Trend is {main_trend} but indicators not aligned.",
+        "market_status": status_msg
+    }

@@ -17,41 +17,94 @@ class DataError(Exception):
     pass
 
 
-def fetch_gold_historical_data(period="30d", interval="1m"):
+def fetch_gold_historical_data(period="30d", interval="1h"):
     """
-    Fetch historical gold data from Yahoo Finance (Gold Futures: GC=F)
-    
-    Args:
-        period: Data period (1d, 5d, 1mo, 3mo, 6mo, 1y, 2y, 5y, 10y, ytd, max)
-        interval: Data interval (1m, 2m, 5m, 15m, 30m, 60m, 90m, 1h, 1d, 5d, 1wk, 1mo, 3mo)
-    
-    Returns:
-        DataFrame with OHLCV data
+    Fetch historical gold data using yf.download() which is more robust
     """
-    try:
-        # Download gold futures data (GC=F) or spot gold (XAUUSD=X)
-        # Using GC=F (Gold Futures) as it has better intraday data
-        ticker = yf.Ticker("GC=F")
-        
-        # Get historical data
-        hist = ticker.history(period=period, interval=interval)
-        
-        if hist.empty:
-            raise DataError("No data received from Yahoo Finance")
-        
-        # Rename columns to lowercase for consistency
-        hist.columns = [col.lower() for col in hist.columns]
-        
-        # Keep only OHLCV
-        hist = hist[["open", "high", "low", "close", "volume"]]
-        
-        # Remove timezone info and convert to UTC
-        hist.index = pd.to_datetime(hist.index).tz_localize(None)
-        
-        return hist
-        
-    except Exception as e:
-        raise DataError(f"Failed to fetch gold data: {str(e)}")
+    import time
+    import random
+    import yfinance as yf
+    
+    # Try multiple tickers
+    tickers = [
+        ("GC=F", "Gold Futures"),
+        ("XAUUSD=X", "Gold Spot"),
+    ]
+    
+    last_error = None
+    
+    for ticker_symbol, ticker_name in tickers:
+        for attempt in range(3):
+            try:
+                print(f"Attempting fetch from {ticker_name} ({ticker_symbol})... Attempt {attempt + 1}/3")
+                
+                # Use yf.download which handles sessions internally better than Ticker.history
+                hist = yf.download(
+                    tickers=ticker_symbol,
+                    period=period,
+                    interval=interval,
+                    progress=False,
+                    timeout=20,
+                    auto_adjust=True  # Adjusts for splits/dividends automatically
+                )
+                
+                if not hist.empty and len(hist) > 100:
+                    print(f"✓ Successfully fetched {len(hist)} rows from {ticker_name}")
+                    
+                    # Clean up data
+                    # yf.download might return MultiIndex columns.
+                    # Recent versions often return (Price, Ticker) -> Level 0 is Price.
+                    # Older versions or different settings might return (Ticker, Price) -> Level 1 is Price.
+                    if isinstance(hist.columns, pd.MultiIndex):
+                        # Try to find the level containing 'Close'
+                        found_price_level = False
+                        for i in range(hist.columns.nlevels):
+                            level_values = hist.columns.get_level_values(i)
+                            if "Close" in level_values:
+                                hist.columns = level_values
+                                found_price_level = True
+                                break
+                        
+                        # Fallback if 'Close' not found (unlikely)
+                        if not found_price_level:
+                            hist.columns = hist.columns.droplevel(0)
+                        
+                    hist.columns = [col.lower() for col in hist.columns]
+                    
+                    # Ensure we have required columns
+                    required = ["open", "high", "low", "close", "volume"]
+                    if not all(col in hist.columns for col in required):
+                        # Sometimes volume is missing for forex/spot
+                        if "volume" not in hist.columns:
+                            hist["volume"] = 0
+                    
+                    hist = hist[["open", "high", "low", "close", "volume"]]
+                    
+                    # Remove timezone info
+                    if hist.index.tz is not None:
+                        hist.index = hist.index.tz_localize(None)
+                    
+                    return hist
+                
+                print(f"⚠ {ticker_name} returned empty/insufficient data")
+                
+            except Exception as e:
+                last_error = str(e)
+                print(f"✗ Error: {last_error}")
+                
+                # Randomized exponential backoff
+                if "Too Many Requests" in last_error or "429" in last_error:
+                    sleep_time = (attempt + 1) * 5 + random.uniform(1, 3)
+                    print(f"  Rate limited. Sleeping {sleep_time:.1f}s...")
+                    time.sleep(sleep_time)
+                else:
+                    time.sleep(2)
+    
+    # If we get here, all attempts failed
+    raise DataError(
+        f"Unable to fetch data. Last error: {last_error}\n"
+        "Try waiting a few minutes or use a different network."
+    )
 
 
 def get_cached_data():
@@ -93,8 +146,8 @@ def update_history():
     
     print("Fetching fresh gold data from Yahoo Finance...")
     
-    # Fetch 30 days of 1-minute data to ensure we have enough for all timeframes
-    df = fetch_gold_historical_data(period="30d", interval="1m")
+    # Fetch 60 days of 1-hour data to ensure enough candles for 4H timeframe (needs 200 candles)
+    df = fetch_gold_historical_data(period="60d", interval="1h")
     
     print(f"✓ Fetched {len(df)} data points")
     
@@ -119,11 +172,11 @@ def to_candles(df, rule):
 
     result = ohlc.dropna()
     
-    # Check if we have enough candles for indicators
-    if len(result) < 250:
+    # Check if we have enough candles for indicators (need 200 for EMA200)
+    if len(result) < 200:
         raise DataError(
-            f"Not enough candles after resampling to {rule}: {len(result)}/250. "
-            f"Try fetching more historical data or use a shorter indicator period."
+            f"Not enough candles after resampling to {rule}: {len(result)}/200. "
+            f"Try fetching more historical data."
         )
     
     return result

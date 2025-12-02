@@ -18,6 +18,32 @@ TG_TOKEN = os.getenv("TG_TOKEN")
 TG_CHAT = os.getenv("TG_CHAT")
 
 
+@app.get("/")
+def root():
+    """Root endpoint - provides API documentation"""
+    return {
+        "service": "XAUUSD Trading Signal Tool",
+        "status": "online",
+        "endpoints": {
+            "/": "This documentation",
+            "/health": "Health check",
+            "/run-signal": "Get trading signal (BUY/SELL/NO_TRADE)"
+        },
+        "telegram_configured": bool(TG_TOKEN and TG_CHAT),
+        "version": "1.0.0"
+    }
+
+
+@app.get("/health")
+def health():
+    """Health check endpoint for monitoring"""
+    return {
+        "status": "healthy",
+        "telegram": "configured" if (TG_TOKEN and TG_CHAT) else "not configured"
+    }
+
+
+
 @app.get("/run-signal")
 def run_signal():
     try:
@@ -47,6 +73,7 @@ def run_signal():
                 f"<b>{action_emoji} XAUUSD Signal</b>\n"
                 f"<b>═══════════════════</b>\n\n"
                 f"📊 <b>Timeframe:</b> {signal['timeframe']}\n"
+                f"📈 <b>Trend:</b> {signal.get('market_status', 'N/A')}\n"
                 f"💰 <b>Entry Price:</b> {signal['entry']:.2f}\n"
                 f"🛑 <b>Stop Loss (SL):</b> {signal['sl']:.2f}\n"
                 f"🎯 <b>Take Profit (TP):</b> {signal['tp']:.2f}\n\n"

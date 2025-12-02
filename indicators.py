@@ -5,9 +5,9 @@ def add_all_indicators(df: pd.DataFrame) -> pd.DataFrame:
     """Adds EMA50/200, RSI, Stoch, MACD, ADX, ATR, Donchian, and kumo proxy.
     Expects index=datetime and columns: open, high, low, close, volume.
     """
-    # Validate we have enough data
-    if len(df) < 250:
-        raise ValueError(f"Insufficient data for indicators: {len(df)} rows (need at least 250)")
+    # Validate we have enough data (need at least 200 for EMA200)
+    if len(df) < 200:
+        raise ValueError(f"Insufficient data for indicators: {len(df)} rows (need at least 200)")
     
     # Check required columns
     required_cols = ["open", "high", "low", "close", "volume"]
