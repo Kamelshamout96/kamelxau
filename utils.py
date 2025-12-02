@@ -10,7 +10,7 @@ DATA_DIR = Path("data")
 DATA_DIR.mkdir(exist_ok=True)
 
 CACHE_FILE = DATA_DIR / "xau_cache.csv"
-CACHE_DURATION = timedelta(minutes=5)  # Refresh data every 5 minutes
+CACHE_DURATION = timedelta(seconds=30)  # Refresh data every 30 seconds for real-time accuracy
 
 
 class DataError(Exception):
@@ -53,9 +53,10 @@ def clean_yf_data(df):
     return df
 
 
-def fetch_gold_historical_data(period="30d", interval="1h"):
+def fetch_gold_historical_data(period="59d", interval="5m"):
     """
-    Fetch historical gold data using yf.download() which is more robust
+    Fetch historical gold data using yf.download()
+    We use 5m interval to ensure accurate indicators for the 5m strategy.
     """
     import time
     import random
@@ -81,7 +82,7 @@ def fetch_gold_historical_data(period="30d", interval="1h"):
                     interval=interval,
                     progress=False,
                     timeout=20,
-                    auto_adjust=True  # Adjusts for splits/dividends automatically
+                    auto_adjust=True
                 )
                 
                 if not hist.empty and len(hist) > 100:
@@ -91,8 +92,7 @@ def fetch_gold_historical_data(period="30d", interval="1h"):
                     hist = clean_yf_data(hist)
                     
                     # PATCH: Fetch latest 1m data to ensure real-time accuracy for the last candle
-                    # Only do this if we are fetching 1h data (standard operation)
-                    if interval == "1h":
+                    if interval == "5m":
                         try:
                             print(f"  Fetching real-time 1m data from {ticker_name} to patch latest candle...")
                             rt_data = yf.download(
@@ -105,10 +105,11 @@ def fetch_gold_historical_data(period="30d", interval="1h"):
                             )
                             
                             if not rt_data.empty:
+                                print(f"  ✓ Fetched {len(rt_data)} 1m rows. Last: {rt_data.index[-1]}")
                                 rt_data = clean_yf_data(rt_data)
                                 
-                                # Resample 1m to 1h to get the latest incomplete candle(s) correctly formed
-                                rt_1h = rt_data.resample("1h").agg({
+                                # Resample 1m to 5m to get the latest incomplete candle(s) correctly formed
+                                rt_5m = rt_data.resample("5T").agg({
                                     'open': 'first',
                                     'high': 'max',
                                     'low': 'min',
@@ -116,22 +117,32 @@ def fetch_gold_historical_data(period="30d", interval="1h"):
                                     'volume': 'sum'
                                 }).dropna()
                                 
-                                if not rt_1h.empty:
-                                    # Update hist with rt_1h
+                                if not rt_5m.empty:
+                                    # Update hist with rt_5m
                                     # Remove overlapping rows from hist
-                                    hist = hist[~hist.index.isin(rt_1h.index)]
+                                    hist = hist[~hist.index.isin(rt_5m.index)]
                                     # Append new/updated rows
-                                    hist = pd.concat([hist, rt_1h]).sort_index()
+                                    hist = pd.concat([hist, rt_5m]).sort_index()
                                     print(f"  ✓ Patched with real-time data. Latest candle: {hist.index[-1]}")
+                                else:
+                                    print("  ⚠ Resampled 1m data is empty")
+                            else:
+                                print("  ⚠ 1m data fetch returned empty")
                                     
                         except Exception as e:
                             print(f"  ⚠ Real-time patch warning: {e}")
                     
                     # Check freshness
                     last_time = hist.index[-1]
-                    # Allow up to 70 minutes lag (to account for just started hour)
-                    if datetime.now() - last_time > timedelta(minutes=70):
-                         print(f"⚠ {ticker_name} data is stale (Last: {last_time}). Trying next ticker...")
+                    time_diff = datetime.now() - last_time
+                    print(f"  📅 Current Candle Open Time: {last_time} (Time since open: {time_diff.total_seconds()/60:.1f} minutes)")
+                    
+                    # For 5m candles, the timestamp is the START of the 5-minute period.
+                    # We allow up to 10 minutes lag.
+                    if time_diff > timedelta(minutes=10):
+                         msg = f"{ticker_name} data is stale (Last: {last_time}). Time diff: {time_diff.total_seconds()/60:.1f}m"
+                         print(f"⚠ {msg}. Trying next ticker...")
+                         last_error = msg
                          continue
                     
                     return hist
@@ -191,13 +202,15 @@ def update_history():
     # Try to use cache first
     cached = get_cached_data()
     if cached is not None and len(cached) > 0:
-        print(f"✓ Using cached data ({len(cached)} rows)")
+        cache_age = (datetime.now() - cached.index[-1].to_pydatetime()).total_seconds()
+        print(f"✓ Using cached data ({len(cached)} rows) - Age: {cache_age:.0f}s - Latest: {cached.index[-1]}")
         return cached
     
     print("Fetching fresh gold data from Yahoo Finance...")
     
-    # Fetch 60 days of 1-hour data to ensure enough candles for 4H timeframe (needs 200 candles)
-    df = fetch_gold_historical_data(period="60d", interval="1h")
+    # Fetch 59 days of 5-minute data (max allowed by YF is usually 60d for 5m)
+    # This gives us enough data for 4H indicators (needs ~30-40 days)
+    df = fetch_gold_historical_data(period="59d", interval="5m")
     
     print(f"✓ Fetched {len(df)} data points")
     
