@@ -28,7 +28,6 @@ def fetch_spot_from_goldapi(api_key: str) -> Tuple[pd.Timestamp, float]:
         "Content-Type": "application/json",
     }
 
-    # retry 3 times
     for attempt in range(3):
         try:
             resp = requests.get(url, headers=headers, timeout=60)
@@ -53,25 +52,34 @@ def fetch_spot_from_goldapi(api_key: str) -> Tuple[pd.Timestamp, float]:
 
 
 # ===========================
-#   Load History
+#   Load History (Auto-Clean)
 # ===========================
 def load_history() -> pd.DataFrame:
-    if DATA_FILE.exists():
+    if not DATA_FILE.exists():
+        return pd.DataFrame(columns=["price"]).astype({"price": "float64"})
+
+    try:
         df = pd.read_csv(DATA_FILE)
 
-        # دعم لكل أنواع الـ timestamps
+        # Support all timestamp formats
         df["timestamp"] = pd.to_datetime(
-            df["timestamp"],
-            utc=True,
-            format="mixed"
+            df["timestamp"], utc=True, format="mixed"
         )
 
+        # Fix ordering & duplicates
         df = df.set_index("timestamp").sort_index()
         df = df[~df.index.duplicated(keep="last")]
 
         return df
 
-    return pd.DataFrame(columns=["price"]).astype({"price": "float64"})
+    except Exception:
+        # Auto-clean corrupted file
+        try:
+            DATA_FILE.unlink()
+        except:
+            pass
+
+        return pd.DataFrame(columns=["price"]).astype({"price": "float64"})
 
 
 # ===========================
@@ -87,19 +95,19 @@ def save_history(df: pd.DataFrame) -> None:
 
 
 # ===========================
-#   Update History with new price
+#   Update History
 # ===========================
 def update_history(api_key: str) -> pd.DataFrame:
     ts, price = fetch_spot_from_goldapi(api_key)
     df = load_history()
 
-    # إذا timestamp الجديد أصغر أو مساوي للقديم → زد 1ms
+    # If ts ≤ last ts → bump by 1ms
     if not df.empty and ts <= df.index.max():
         ts = df.index.max() + pd.Timedelta(milliseconds=1)
 
     df.loc[ts] = price
 
-    # keep last 7 days only
+    # Keep last 7 days only
     if not df.empty:
         df = df[df.index >= (df.index.max() - pd.Timedelta(days=7))]
 
@@ -108,7 +116,7 @@ def update_history(api_key: str) -> pd.DataFrame:
 
 
 # ===========================
-#   Convert History → Candles
+#   Candles Builder
 # ===========================
 def history_to_candles(df: pd.DataFrame, rule: str) -> pd.DataFrame:
     if df.empty or len(df) < 30:
@@ -120,14 +128,17 @@ def history_to_candles(df: pd.DataFrame, rule: str) -> pd.DataFrame:
     try:
         ohlc = df["price"].resample(rule).ohlc().dropna()
     except Exception as e:
-        raise DataError(f"Resample failed: {str(e)}")
+        # If resample fails = data corrupted → delete & reset
+        try:
+            DATA_FILE.unlink()
+        except:
+            pass
+        raise DataError("Corrupted data detected. History reset.")
 
     ohlc["volume"] = 100.0
 
     ohlc.index = pd.to_datetime(
-        ohlc.index,
-        utc=True,
-        format="mixed"
+        ohlc.index, utc=True, format="mixed"
     )
 
     return ohlc
