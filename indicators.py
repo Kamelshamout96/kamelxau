@@ -4,11 +4,9 @@ import pandas as pd
 def add_all_indicators(df: pd.DataFrame) -> pd.DataFrame:
     """Adds EMA50/200, RSI, Stoch, MACD, ADX, ATR, Donchian, and kumo proxy.
     Expects index=datetime and columns: open, high, low, close, volume.
-    """
-    # Validate we have enough data (need at least 200 for EMA200)
-    if len(df) < 200:
-        raise ValueError(f"Insufficient data for indicators: {len(df)} rows (need at least 200)")
     
+    ADAPTIVE MODE: Works with limited data by adjusting indicator periods
+    """
     # Check required columns
     required_cols = ["open", "high", "low", "close", "volume"]
     missing = [col for col in required_cols if col not in df.columns]
@@ -16,22 +14,54 @@ def add_all_indicators(df: pd.DataFrame) -> pd.DataFrame:
         raise ValueError(f"Missing required columns: {missing}")
     
     df = df.copy()
+    data_len = len(df)
+    
+    # Adaptive periods based on available data
+    if data_len < 50:
+        # Very limited data - use minimum periods
+        ema_short = min(10, data_len - 1)
+        ema_long = min(20, data_len - 1)
+        rsi_period = min(7, data_len - 1)
+        stoch_period = min(7, data_len - 1)
+        adx_period = min(7, data_len - 1)
+        atr_period = min(7, data_len - 1)
+        don_period = min(10, data_len - 1)
+        print(f"  ⚠ Limited data mode: Using shorter periods (EMA{ema_short}/{ema_long})")
+    elif data_len < 200:
+        # Moderate data - use reduced periods
+        ema_short = 20
+        ema_long = min(50, data_len - 1)
+        rsi_period = 14
+        stoch_period = 14
+        adx_period = 14
+        atr_period = 14
+        don_period = 20
+        print(f"  ⚠ Reduced data mode: Using EMA{ema_short}/{ema_long}")
+    else:
+        # Full data - use standard periods
+        ema_short = 50
+        ema_long = 200
+        rsi_period = 14
+        stoch_period = 14
+        adx_period = 14
+        atr_period = 14
+        don_period = 20
 
-    # EMAs (need 200+ periods)
-    df["ema50"] = ta.trend.EMAIndicator(close=df["close"], window=50).ema_indicator()
-    df["ema200"] = ta.trend.EMAIndicator(close=df["close"], window=200).ema_indicator()
+    # EMAs
+    df["ema50"] = ta.trend.EMAIndicator(close=df["close"], window=ema_short).ema_indicator()
+    df["ema200"] = ta.trend.EMAIndicator(close=df["close"], window=ema_long).ema_indicator()
 
-    # RSI (needs 14 periods)
-    rsi = ta.momentum.RSIIndicator(close=df["close"], window=14)
+    # RSI
+    rsi = ta.momentum.RSIIndicator(close=df["close"], window=rsi_period)
     df["rsi"] = rsi.rsi()
 
-    # Stochastic (needs 14 periods)
+    # Stochastic
     stoch = ta.momentum.StochasticOscillator(
         high=df["high"],
         low=df["low"],
         close=df["close"],
-        window=14,
-        smooth_window=3,
+        window=stoch_period,
+        smooth_window=min(3, stoch_period),
     )
     df["stoch_k"] = stoch.stoch()
     df["stoch_d"] = stoch.stoch_signal()
@@ -41,29 +71,29 @@ def add_all_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df["macd"] = macd.macd()
     df["macd_signal"] = macd.macd_signal()
 
-    # ADX (needs 14 periods)
+    # ADX
     adx = ta.trend.ADXIndicator(
-        high=df["high"], low=df["low"], close=df["close"], window=14
+        high=df["high"], low=df["low"], close=df["close"], window=adx_period
     )
     df["adx"] = adx.adx()
 
-    # ATR (needs 14 periods)
+    # ATR
     atr = ta.volatility.AverageTrueRange(
-        high=df["high"], low=df["low"], close=df["close"], window=14
+        high=df["high"], low=df["low"], close=df["close"], window=atr_period
     )
     df["atr"] = atr.average_true_range()
 
-    # Donchian (needs 20 periods)
-    df["don_high"] = df["high"].rolling(window=20, min_periods=20).max()
-    df["don_low"] = df["low"].rolling(window=20, min_periods=20).min()
+    # Donchian
+    df["don_high"] = df["high"].rolling(window=don_period, min_periods=1).max()
+    df["don_low"] = df["low"].rolling(window=don_period, min_periods=1).min()
 
     # "Kumo" proxy using EMAs (structure only)
     df["kumo_top"] = df["ema50"]
     df["kumo_bottom"] = df["ema200"]
     
-    # SuperTrend Indicator (period=10, multiplier=3)
-    # SuperTrend is a trend-following indicator based on ATR
-    df = add_supertrend(df, period=10, multiplier=3)
+    # SuperTrend Indicator (adaptive period)
+    st_period = min(10, data_len - 1)
+    df = add_supertrend(df, period=st_period, multiplier=3)
 
     return df.dropna()
 

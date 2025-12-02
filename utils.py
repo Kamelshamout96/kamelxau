@@ -1,9 +1,11 @@
 import os
+import time
 import requests
 import pandas as pd
 from pathlib import Path
 from datetime import datetime, timedelta
 import yfinance as yf
+from bs4 import BeautifulSoup
 
 
 DATA_DIR = Path("data")
@@ -198,13 +200,17 @@ def update_history():
     """
     Fetch fresh historical data or return cached data
     This will work on the FIRST call - no need to accumulate data!
+    Now enhanced with LIVE SPOT GOLD PRICE for real-time accuracy
     """
     # Try to use cache first
     cached = get_cached_data()
     if cached is not None and len(cached) > 0:
         cache_age = (datetime.now() - cached.index[-1].to_pydatetime()).total_seconds()
-        print(f"✓ Using cached data ({len(cached)} rows) - Age: {cache_age:.0f}s - Latest: {cached.index[-1]}")
-        return cached
+        
+        # If cache is very fresh (< 30 seconds), use it as-is
+        if cache_age < 30:
+            print(f"✓ Using cached data ({len(cached)} rows) - Age: {cache_age:.0f}s - Latest: {cached.index[-1]}")
+            return cached
     
     print("Fetching fresh gold data from Yahoo Finance...")
     
@@ -212,9 +218,48 @@ def update_history():
     # This gives us enough data for 4H indicators (needs ~30-40 days)
     df = fetch_gold_historical_data(period="59d", interval="5m")
     
-    print(f"✓ Fetched {len(df)} data points")
+    print(f"✓ Fetched {len(df)} data points from Yahoo Finance")
     
-    # Cache the data
+    # ENHANCEMENT: Get LIVE SPOT GOLD PRICE and update latest candle
+    try:
+        live_price = get_live_gold_price_usa()
+        current_time = datetime.now()
+        
+        # Round to nearest 5-minute interval for 5m candle
+        current_5m = current_time.replace(second=0, microsecond=0)
+        minutes = current_5m.minute
+        rounded_minutes = (minutes // 5) * 5
+        current_5m = current_5m.replace(minute=rounded_minutes)
+        
+        print(f"  🔴 LIVE PATCH: Using real-time Spot Gold price: ${live_price:.2f}")
+        
+        # Check if we already have a candle for current 5m period
+        if current_5m in df.index:
+            # Update the existing candle's close price and high/low if needed
+            df.loc[current_5m, 'close'] = live_price
+            df.loc[current_5m, 'high'] = max(df.loc[current_5m, 'high'], live_price)
+            df.loc[current_5m, 'low'] = min(df.loc[current_5m, 'low'], live_price)
+            print(f"  ✓ Updated existing 5m candle at {current_5m} with live price")
+        else:
+            # Create a new candle for the current 5m period
+            new_candle = pd.DataFrame({
+                'open': [live_price],
+                'high': [live_price],
+                'low': [live_price],
+                'close': [live_price],
+                'volume': [0]
+            }, index=[current_5m])
+            
+            df = pd.concat([df, new_candle]).sort_index()
+            print(f"  ✓ Created new 5m candle at {current_5m} with live price")
+        
+    except DataError as e:
+        print(f"  ⚠ Could not fetch live price: {e}")
+        print(f"  → Continuing with Yahoo Finance data only")
+    except Exception as e:
+        print(f"  ⚠ Unexpected error getting live price: {e}")
+    
+    # Cache the enhanced data
     save_cache(df)
     
     return df
@@ -263,3 +308,85 @@ def send_telegram(token, chat_id, msg):
         print(f"✓ Telegram message sent successfully")
     except Exception as e:
         print(f"✗ Failed to send Telegram message: {e}")
+
+
+def get_live_gold_price_usa():
+    """
+    Fetch live Spot Gold price per ounce in USD from livepriceofgold.com.
+    Includes cache-busting and a JSON API fallback to avoid stale first-read values.
+    """
+    import re
+
+    url = "https://www.livepriceofgold.com/usa-gold-price.html"
+    goldprice_api = "https://data-asg.goldprice.org/dbXRates/USD"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
+    }
+
+    try:
+        print(f"Scraping live Spot Gold price from {url}...")
+        response = requests.get(
+            url,
+            params={"t": int(time.time())},
+            timeout=10,
+            headers=headers,
+        )
+        response.raise_for_status()
+
+        soup = BeautifulSoup(response.content, "html.parser")
+
+        xauusd_cell = soup.find("td", {"data-price": "XAUUSD"})
+        if xauusd_cell:
+            price_text = xauusd_cell.get_text(strip=True).replace(",", "").replace("$", "")
+            try:
+                price = float(price_text)
+                print(f"Live Spot Gold price (XAUUSD cell): ${price:.2f} USD/oz")
+                return price
+            except ValueError:
+                pass
+
+        page_text = soup.get_text()
+
+        spot_gold_pattern = re.search(
+            r"SPOT\s+GOLD[^0-9]*([0-9,]+\.[0-9]{2})", page_text, re.IGNORECASE
+        )
+        if spot_gold_pattern:
+            price_text = spot_gold_pattern.group(1).replace(",", "")
+            price = float(price_text)
+            print(f"Live Spot Gold price (SPOT GOLD pattern): ${price:.2f} USD/oz")
+            return price
+
+        title = soup.find("title")
+        if title:
+            title_price = re.search(r"[\$]?\s*([4-5],?\d{3}\.\d{2})", title.get_text())
+            if title_price:
+                price_text = title_price.group(1).replace(",", "")
+                price = float(price_text)
+                print(f"Live Spot Gold price (title): ${price:.2f} USD/oz")
+                return price
+
+        all_prices = re.findall(r"([4-5],?\d{3}\.\d{2})", page_text)
+        if all_prices:
+            price_text = all_prices[0].replace(",", "")
+            price = float(price_text)
+            print(f"Live Spot Gold price (fallback): ${price:.2f} USD/oz")
+            return price
+
+        print("Primary page did not yield a price. Trying goldprice API...")
+        api_resp = requests.get(goldprice_api, timeout=10, headers=headers)
+        api_resp.raise_for_status()
+        data = api_resp.json()
+        items = data.get("items", [])
+        if items:
+            api_price = float(items[0].get("xauPrice"))
+            print(f"Live Spot Gold price (goldprice API): ${api_price:.2f} USD/oz")
+            return api_price
+
+        raise DataError("Could not find Spot Gold price in page content")
+
+    except requests.RequestException as e:
+        raise DataError(f"Network error fetching live gold price: {e}")
+    except Exception as e:
+        raise DataError(f"Error parsing live gold price: {e}")
