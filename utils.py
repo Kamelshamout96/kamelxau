@@ -15,6 +15,9 @@ class DataError(Exception):
     pass
 
 
+# ===========================
+#   Fetch GoldAPI Price
+# ===========================
 def fetch_spot_from_goldapi(api_key: str) -> Tuple[pd.Timestamp, float]:
     if not api_key:
         raise DataError("GOLDAPI_KEY is not set")
@@ -24,70 +27,105 @@ def fetch_spot_from_goldapi(api_key: str) -> Tuple[pd.Timestamp, float]:
         "x-access-token": api_key,
         "Content-Type": "application/json",
     }
-    resp = requests.get(url, headers=headers, timeout=120)
-    try:
-        data = resp.json()
-    except Exception:
-        raise DataError(f"GoldAPI invalid response: HTTP {resp.status_code}")
 
-    if "price" not in data:
-        msg = data.get("error") or data.get("message") or str(data)
-        raise DataError(f"GoldAPI error: {msg}")
+    # retry 3 times
+    for attempt in range(3):
+        try:
+            resp = requests.get(url, headers=headers, timeout=60)
+            data = resp.json()
 
-    price = float(data["price"])
-    if "timestamp" in data:
-        ts = pd.to_datetime(data["timestamp"], unit="s", utc=True)
-    else:
-        ts = pd.to_datetime(data.get("date"), utc=True)
+            if "price" not in data:
+                msg = data.get("error") or data.get("message") or str(data)
+                raise DataError(f"GoldAPI error: {msg}")
 
-    return ts, price
+            price = float(data["price"])
+
+            if "timestamp" in data:
+                ts = pd.to_datetime(data["timestamp"], unit="s", utc=True)
+            else:
+                ts = pd.to_datetime(data.get("date"), utc=True)
+
+            return ts, price
+
+        except Exception as e:
+            if attempt == 2:
+                raise DataError(f"GoldAPI timeout/error: {str(e)}")
 
 
+# ===========================
+#   Load History
+# ===========================
 def load_history() -> pd.DataFrame:
     if DATA_FILE.exists():
         df = pd.read_csv(DATA_FILE)
         df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
+
+        # sort + remove duplicates to avoid negative dimension
         df = df.set_index("timestamp").sort_index()
+        df = df[~df.index.duplicated(keep="last")]
+
         return df
+
     return pd.DataFrame(columns=["price"]).astype({"price": "float64"})
 
 
+# ===========================
+#   Save History
+# ===========================
 def save_history(df: pd.DataFrame) -> None:
-    df = df.copy()
-    df = df.sort_index()
+    df = df.copy().sort_index()
+    df = df[~df.index.duplicated(keep="last")]
+
     df.reset_index().rename(columns={"index": "timestamp"}).to_csv(
         DATA_FILE, index=False
     )
 
 
+# ===========================
+#   Update History with new price
+# ===========================
 def update_history(api_key: str) -> pd.DataFrame:
     ts, price = fetch_spot_from_goldapi(api_key)
     df = load_history()
+
+    # إذا timestamp الجديد أصغر أو مساوي للقديم → زد 1ms
+    if not df.empty and ts <= df.index.max():
+        ts = df.index.max() + pd.Timedelta(milliseconds=1)
+
     df.loc[ts] = price
+
+    # keep last 7 days only
     if not df.empty:
-        max_ts = df.index.max()
-        df = df[df.index >= (max_ts - pd.Timedelta(days=7))]
+        df = df[df.index >= (df.index.max() - pd.Timedelta(days=7))]
+
     save_history(df)
     return df
 
 
+# ===========================
+#   Convert History → Candles
+# ===========================
 def history_to_candles(df: pd.DataFrame, rule: str) -> pd.DataFrame:
     if df.empty or len(df) < 30:
         raise DataError("Not enough history collected yet")
-    ohlc = df["price"].resample(rule).ohlc().dropna()
+
+    df = df.copy().sort_index()
+    df = df[~df.index.duplicated(keep="last")]
+
+    try:
+        ohlc = df["price"].resample(rule).ohlc().dropna()
+    except Exception as e:
+        raise DataError(f"Resample failed: {str(e)}")
+
     ohlc["volume"] = 100.0
     ohlc.index = pd.to_datetime(ohlc.index, utc=True)
-    ohlc = ohlc.rename(
-        columns={
-            "open": "open",
-            "high": "high",
-            "low": "low",
-            "close": "close",
-        }
-    )
+
     return ohlc
 
 
+# ===========================
+#   Telegram Alerts
+# ===========================
 def send_telegram(token: str, chat_id: str, msg: str) -> None:
     if not token or not chat_id:
         return
