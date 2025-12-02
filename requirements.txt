@@ -1,6 +1,6 @@
 fastapi
 uvicorn
 pandas
-git+https://github.com/twopirllc/pandas-ta.git
+ta
 requests
 python-telegram-bot==13.15

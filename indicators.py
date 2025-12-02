@@ -1,25 +1,25 @@
+import ta
 import pandas as pd
-import pandas_ta as ta
 
 def add_all_indicators(df: pd.DataFrame):
-    df["ema50"] = ta.ema(df["close"], length=50)
-    df["ema200"] = ta.ema(df["close"], length=200)
-    ich = ta.ichimoku(df["high"], df["low"], df["close"])
-    df["kumo_top"] = ich[0]["ISA_9"]
-    df["kumo_bottom"] = ich[0]["ISB_26"]
-    st = ta.supertrend(df["high"], df["low"], df["close"])
-    df["supertrend"] = st["SUPERT_7_3.0"]
-    df["rsi"] = ta.rsi(df["close"], length=14)
-    stoch = ta.stoch(df["high"], df["low"], df["close"])
-    df["stoch_k"] = stoch["STOCHk_14_3_3"]
-    df["stoch_d"] = stoch["STOCHd_14_3_3"]
-    macd = ta.macd(df["close"])
-    df["macd"] = macd["MACD_12_26_9"]
-    df["macd_signal"] = macd["MACDs_12_26_9"]
-    df["adx"] = ta.adx(df["high"], df["low"], df["close"])["ADX_14"]
-    df["obv"] = ta.obv(df["close"], df["volume"])
-    don = ta.donchian(df["high"], df["low"], lower_length=20, upper_length=20)
-    df["don_low"] = don["DCL_20_20"]
-    df["don_high"] = don["DCU_20_20"]
-    df["atr"] = ta.atr(df["high"], df["low"], df["close"])
+    df["ema50"] = ta.trend.EMAIndicator(close=df["close"], window=50).ema_indicator()
+    df["ema200"] = ta.trend.EMAIndicator(close=df["close"], window=200).ema_indicator()
+    rsi = ta.momentum.RSIIndicator(close=df["close"], window=14)
+    df["rsi"] = rsi.rsi()
+    stoch = ta.momentum.StochasticOscillator(
+        high=df["high"], low=df["low"], close=df["close"], window=14, smooth_window=3
+    )
+    df["stoch_k"] = stoch.stoch()
+    df["stoch_d"] = stoch.stoch_signal()
+    macd = ta.trend.MACD(close=df["close"])
+    df["macd"] = macd.macd()
+    df["macd_signal"] = macd.macd_signal()
+    adx = ta.trend.ADXIndicator(high=df["high"], low=df["low"], close=df["close"], window=14)
+    df["adx"] = adx.adx()
+    atr = ta.volatility.AverageTrueRange(high=df["high"], low=df["low"], close=df["close"], window=14)
+    df["atr"] = atr.average_true_range()
+    df["don_high"] = df["high"].rolling(window=20).max()
+    df["don_low"] = df["low"].rolling(window=20).min()
+    df["kumo_top"] = df["ema50"]
+    df["kumo_bottom"] = df["ema200"]
     return df.dropna()
