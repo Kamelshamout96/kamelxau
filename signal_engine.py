@@ -7,7 +7,11 @@ def _trend(row):
 
 
 def check_entry(df_5m, df_15m, df_1h, df_4h):
-    """Multi-timeframe logic:
+    """Multi-timeframe logic with dual confidence levels:
+    - HIGH CONFIDENCE: All strict conditions met (⭐⭐⭐ Most Accurate)
+    - MEDIUM CONFIDENCE: Relaxed conditions (⭐⭐ Less Accurate)
+    
+    Timeframe logic:
     - 1H + 4H define main trend
     - 15m confirms
     - 5m gives precise entry
@@ -41,7 +45,7 @@ def check_entry(df_5m, df_15m, df_1h, df_4h):
             "market_status": status_msg
         }
 
-    # BUY setup
+    # BUY setup - HIGH CONFIDENCE (⭐⭐⭐ Strict conditions)
     if main_trend == "bullish":
         if (
             last5["rsi"] > 55
@@ -52,6 +56,30 @@ def check_entry(df_5m, df_15m, df_1h, df_4h):
         ):
             return {
                 "action": "BUY",
+                "confidence": "HIGH",
+                "confidence_emoji": "⭐⭐⭐",
+                "entry": float(last5["close"]),
+                "sl": float(last5["close"] - 1.5 * last5["atr"]),
+                "tp": float(last5["close"] + 3 * last5["atr"]),
+                "timeframe": "5m",
+                "market_status": status_msg
+            }
+        
+        # BUY setup - MEDIUM CONFIDENCE (⭐⭐ Relaxed conditions)
+        # At least 3 out of 5 conditions must be true
+        buy_conditions = [
+            last5["rsi"] > 50,  # Relaxed from 55
+            last5["macd"] > last5["macd_signal"],
+            last5["stoch_k"] > last5["stoch_d"],
+            last5["adx"] > 15,  # Relaxed from 20
+            last5["close"] > last5["ema50"]  # Replaced Donchian with simpler EMA check
+        ]
+        
+        if sum(buy_conditions) >= 3:
+            return {
+                "action": "BUY",
+                "confidence": "MEDIUM",
+                "confidence_emoji": "⭐⭐",
                 "entry": float(last5["close"]),
                 "sl": float(last5["close"] - 1.5 * last5["atr"]),
                 "tp": float(last5["close"] + 3 * last5["atr"]),
@@ -59,7 +87,7 @@ def check_entry(df_5m, df_15m, df_1h, df_4h):
                 "market_status": status_msg
             }
 
-    # SELL setup
+    # SELL setup - HIGH CONFIDENCE (⭐⭐⭐ Strict conditions)
     if main_trend == "bearish":
         if (
             last5["rsi"] < 45
@@ -70,6 +98,29 @@ def check_entry(df_5m, df_15m, df_1h, df_4h):
         ):
             return {
                 "action": "SELL",
+                "confidence": "HIGH",
+                "confidence_emoji": "⭐⭐⭐",
+                "entry": float(last5["close"]),
+                "sl": float(last5["close"] + 1.5 * last5["atr"]),
+                "tp": float(last5["close"] - 3 * last5["atr"]),
+                "timeframe": "5m",
+                "market_status": status_msg
+            }
+        
+        # SELL setup - MEDIUM CONFIDENCE (⭐⭐ Relaxed conditions)
+        sell_conditions = [
+            last5["rsi"] < 50,  # Relaxed from 45
+            last5["macd"] < last5["macd_signal"],
+            last5["stoch_k"] < last5["stoch_d"],
+            last5["adx"] > 15,  # Relaxed from 20
+            last5["close"] < last5["ema50"]  # Replaced Donchian with simpler EMA check
+        ]
+        
+        if sum(sell_conditions) >= 3:
+            return {
+                "action": "SELL",
+                "confidence": "MEDIUM",
+                "confidence_emoji": "⭐⭐",
                 "entry": float(last5["close"]),
                 "sl": float(last5["close"] + 1.5 * last5["atr"]),
                 "tp": float(last5["close"] - 3 * last5["atr"]),
@@ -79,6 +130,6 @@ def check_entry(df_5m, df_15m, df_1h, df_4h):
 
     return {
         "action": "NO_TRADE", 
-        "reason": f"Waiting for 5m entry. Trend is {main_trend} but indicators not aligned.",
+        "reason": f"Waiting for entry. Trend is {main_trend} but not enough indicators aligned.",
         "market_status": status_msg
     }

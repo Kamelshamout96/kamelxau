@@ -68,15 +68,20 @@ def run_signal():
         # 5) تنبيه تيليجرام
         if signal.get("action") in ("BUY", "SELL"):
             action_emoji = "🟢 BUY" if signal["action"] == "BUY" else "🔴 SELL"
+            confidence = signal.get("confidence", "UNKNOWN")
+            confidence_emoji = signal.get("confidence_emoji", "")
+            
             msg = (
                 f"<b>═══════════════════</b>\n"
                 f"<b>{action_emoji} XAUUSD Signal</b>\n"
                 f"<b>═══════════════════</b>\n\n"
+                f"🎯 <b>Confidence:</b> {confidence} {confidence_emoji}\n"
                 f"📊 <b>Timeframe:</b> {signal['timeframe']}\n"
                 f"📈 <b>Trend:</b> {signal.get('market_status', 'N/A')}\n"
                 f"💰 <b>Entry Price:</b> {signal['entry']:.2f}\n"
                 f"🛑 <b>Stop Loss (SL):</b> {signal['sl']:.2f}\n"
                 f"🎯 <b>Take Profit (TP):</b> {signal['tp']:.2f}\n\n"
+                f"<i>{'⭐⭐⭐ Most Accurate' if confidence == 'HIGH' else '⭐⭐ Less Accurate'}</i>\n"
                 f"<b>═══════════════════</b>"
             )
             send_telegram(TG_TOKEN, TG_CHAT, msg)

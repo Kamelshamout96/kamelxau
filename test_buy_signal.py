@@ -122,14 +122,19 @@ def send_telegram_test(signal):
         
         # Format message
         emoji = "🟢" if action == "BUY" else "🔴"
+        confidence = signal.get("confidence", "UNKNOWN")
+        confidence_emoji = signal.get("confidence_emoji", "")
+        
         msg = (
             f"═══════════════════\n"
             f"{emoji} <b>{action} XAUUSD Signal (TEST)</b>\n"
             f"═══════════════════\n\n"
+            f"🎯 <b>Confidence:</b> {confidence} {confidence_emoji}\n"
             f"📊 Timeframe: {signal['timeframe']}\n"
             f"💰 Entry Price: {signal['entry']:.2f}\n"
             f"🛑 Stop Loss (SL): {signal['sl']:.2f}\n"
             f"🎯 Take Profit (TP): {signal['tp']:.2f}\n\n"
+            f"<i>{'⭐⭐⭐ Most Accurate' if confidence == 'HIGH' else '⭐⭐ Less Accurate'}</i>\n"
             f"⚠️ <i>This is a TEST signal with mock data</i>\n"
             f"═══════════════════"
         )
