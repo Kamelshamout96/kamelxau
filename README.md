@@ -40,6 +40,46 @@ export TG_CHAT="your_chat_id"
 
 **Note:** Telegram is OPTIONAL. The tool works without it and returns signals via API.
 
+### 3. Required Firestore Environment Variables (storage backend)
+The collector now writes/reads 1m candles from Firestore instead of local CSV. Configure:
+```bash
+# Windows PowerShell
+$env:GOOGLE_CREDENTIALS_JSON='{
+  "type": "service_account",
+  "project_id": "kamel-xau",
+  "private_key_id": "22819792e04a67c05566826db9fc4ce3e9e0446f",
+  "private_key": "-----BEGIN PRIVATE KEY-----\nMIIEvwIBADANBgkqhkiG9w0BAQEFAASCBKkwggSlAgEAAoIBAQDbQIKZ2vDc0gSV\n7+ncze2JIykDHp+E7HqzXOxgqH83tF2VgBwqyeWfItXHtYmtCV2I1TM1GbQST/r4\nCZ3kF4we8W5JW94fbKxFw88PHF+W6kUHopHjrTh2SYxWVxtpM0H+REMMdvYl0jsO\n0qL/kfh2iNcqO5Y9wXedPGjJj7VxBG0J/o8fCnzegdIBuqhW+H9eIqBjQuBwiulZ\nAo7jhPgHsE3DfDwKhoVdgbWXA+FMTxGoYsyMD0azoC5vp9DgimqgtMsjB0DecLLD\nZeO7q5hKLZ6UUAkKNWosKSlwqey1KS1VvrcD2Fvbwjf1vygMiiAX0wKMWFvY8UsJ\nFlU8+sWxAgMBAAECggEAaX4fmMGkdMtEU5RM9OXMbdiSCiM4468Y1qZWQaexFm9d\nO+qZIulj527OZ7nsVWqVK5pRejI01z7OZXvTEYVW8Sh/RSLDvGEAfszZGs8vGyD7\nN9I72c1lxlxa/swIr1RvY1Ua4at3gfkmW1pz/P4SC46J4JMtFee5ktkXHixcQ9TV\n1Y7mzP4DOriPvw1dM6EuUebQk6D9DicMLEep1yDCJdCGcLmTm0a241ozvt2x+fSE\nK2Wxr742395G2u2FzB1SVfWskGdqcDZkF+we9koTYPcBNG/CB3hIDJkTliXQuK1E\ncCZYNhpKzBbGqqhix7x9Hi5kRYHC4rAUH69rzJ96VQKBgQD9aalWC7IlWE52i0I6\nt7VaEeYGKRkcBCjUuT9FX+PXlwa5cF7dLzcJVqkGsUwwxpgi9+xCAzzF8tjHbYfM\nRo9AxGEqfnPSsPYckHiCGJ7A87/7AuZh1ze5/ONV934cbIMJbMBjaMpgOnS9KmK4\nF7+NmbDaZa9xXUVmWHBEpLu4FwKBgQDdfZBIL1bQVmSAtJNtn0aB1OC0m9DU97pV\net2dSltWiXePMysatAfakvI/W2QtEAiBfxh++nMGTSVsuuxF5KuO5JEc1KMwi5C3\nF6v62HQFiAuZS2hJElonSrZShIBT+k5F5hjQcrGOCzQchOJXCA/4XbZS0pOT0I7+\nOX1GDfZFdwKBgQDZMnXT7SRcQ8rEaelzAD/smgioYRNHYv1IDhp/sIdNIgG+cOSt\n+SjX1TH8LXwbFiwRVKNnlPTCyLkqfON2n0drAKYzULye6dOXee//uXBf+ssiLkMd\nuuPlgi2rYfvyCsNpEY/35DoIrjGebLS+CoTArejZ12u+4213Ifffrb3DMwKBgQCI\nJ6rtJOSqF6GamObUCYhPQWyMuggrEsohx/C5wz7YuJKdnefOd4MocxKlremr5eJE\nsLt/OzhAVGZAK7wYzxRDN/CYl4Jl0jW4x71561uPFu2CY5+M49I1uzDPExLMDN/X\nCjaQ1SCe3/Y93dZBh/xBQmJVEYuU3y03zGFdEjIkywKBgQCWkVL1GLNjr0JYVyds\nQodeFItiiH75PPsiGp+hgsZhp8Blzejz+kGl7Fp29jFm8Kth/Pkp9W83KB7kKZqS\nxCDR+Ev4h/Dar1D/cRWAyFI0iGJrOkxJdrIGnNArhjbfk0r7o0rONuimMbxgN4EX\nceqbQxL5+H/MeK1CLXeOoIsZRQ==\n-----END PRIVATE KEY-----\n",
+  "client_email": "firebase-adminsdk-fbsvc@kamel-xau.iam.gserviceaccount.com",
+  "client_id": "108264481792120676498",
+  "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+  "token_uri": "https://oauth2.googleapis.com/token",
+  "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+  "client_x509_cert_url": "https://www.googleapis.com/robot/v1/metadata/x509/firebase-adminsdk-fbsvc%40kamel-xau.iam.gserviceaccount.com",
+  "universe_domain": "googleapis.com"
+}'
+$env:FIRESTORE_PROJECT_ID='kamel-xau'
+
+# Linux/Mac
+export GOOGLE_CREDENTIALS_JSON='{
+  "type": "service_account",
+  "project_id": "kamel-xau",
+  "private_key_id": "22819792e04a67c05566826db9fc4ce3e9e0446f",
+  "private_key": "-----BEGIN PRIVATE KEY-----\nMIIEvwIBADANBgkqhkiG9w0BAQEFAASCBKkwggSlAgEAAoIBAQDbQIKZ2vDc0gSV\n7+ncze2JIykDHp+E7HqzXOxgqH83tF2VgBwqyeWfItXHtYmtCV2I1TM1GbQST/r4\nCZ3kF4we8W5JW94fbKxFw88PHF+W6kUHopHjrTh2SYxWVxtpM0H+REMMdvYl0jsO\n0qL/kfh2iNcqO5Y9wXedPGjJj7VxBG0J/o8fCnzegdIBuqhW+H9eIqBjQuBwiulZ\nAo7jhPgHsE3DfDwKhoVdgbWXA+FMTxGoYsyMD0azoC5vp9DgimqgtMsjB0DecLLD\nZeO7q5hKLZ6UUAkKNWosKSlwqey1KS1VvrcD2Fvbwjf1vygMiiAX0wKMWFvY8UsJ\nFlU8+sWxAgMBAAECggEAaX4fmMGkdMtEU5RM9OXMbdiSCiM4468Y1qZWQaexFm9d\nO+qZIulj527OZ7nsVWqVK5pRejI01z7OZXvTEYVW8Sh/RSLDvGEAfszZGs8vGyD7\nN9I72c1lxlxa/swIr1RvY1Ua4at3gfkmW1pz/P4SC46J4JMtFee5ktkXHixcQ9TV\n1Y7mzP4DOriPvw1dM6EuUebQk6D9DicMLEep1yDCJdCGcLmTm0a241ozvt2x+fSE\nK2Wxr742395G2u2FzB1SVfWskGdqcDZkF+we9koTYPcBNG/CB3hIDJkTliXQuK1E\ncCZYNhpKzBbGqqhix7x9Hi5kRYHC4rAUH69rzJ96VQKBgQD9aalWC7IlWE52i0I6\nt7VaEeYGKRkcBCjUuT9FX+PXlwa5cF7dLzcJVqkGsUwwxpgi9+xCAzzF8tjHbYfM\nRo9AxGEqfnPSsPYckHiCGJ7A87/7AuZh1ze5/ONV934cbIMJbMBjaMpgOnS9KmK4\nF7+NmbDaZa9xXUVmWHBEpLu4FwKBgQDdfZBIL1bQVmSAtJNtn0aB1OC0m9DU97pV\net2dSltWiXePMysatAfakvI/W2QtEAiBfxh++nMGTSVsuuxF5KuO5JEc1KMwi5C3\nF6v62HQFiAuZS2hJElonSrZShIBT+k5F5hjQcrGOCzQchOJXCA/4XbZS0pOT0I7+\nOX1GDfZFdwKBgQDZMnXT7SRcQ8rEaelzAD/smgioYRNHYv1IDhp/sIdNIgG+cOSt\n+SjX1TH8LXwbFiwRVKNnlPTCyLkqfON2n0drAKYzULye6dOXee//uXBf+ssiLkMd\nuuPlgi2rYfvyCsNpEY/35DoIrjGebLS+CoTArejZ12u+4213Ifffrb3DMwKBgQCI\nJ6rtJOSqF6GamObUCYhPQWyMuggrEsohx/C5wz7YuJKdnefOd4MocxKlremr5eJE\nsLt/OzhAVGZAK7wYzxRDN/CYl4Jl0jW4x71561uPFu2CY5+M49I1uzDPExLMDN/X\nCjaQ1SCe3/Y93dZBh/xBQmJVEYuU3y03zGFdEjIkywKBgQCWkVL1GLNjr0JYVyds\nQodeFItiiH75PPsiGp+hgsZhp8Blzejz+kGl7Fp29jFm8Kth/Pkp9W83KB7kKZqS\nxCDR+Ev4h/Dar1D/cRWAyFI0iGJrOkxJdrIGnNArhjbfk0r7o0rONuimMbxgN4EX\nceqbQxL5+H/MeK1CLXeOoIsZRQ==\n-----END PRIVATE KEY-----\n",
+  "client_email": "firebase-adminsdk-fbsvc@kamel-xau.iam.gserviceaccount.com",
+  "client_id": "108264481792120676498",
+  "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+  "token_uri": "https://oauth2.googleapis.com/token",
+  "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+  "client_x509_cert_url": "https://www.googleapis.com/robot/v1/metadata/x509/firebase-adminsdk-fbsvc%40kamel-xau.iam.gserviceaccount.com",
+  "universe_domain": "googleapis.com"
+}'
+export FIRESTORE_PROJECT_ID='kamel-xau'
+```
+Tips:
+- استخدم Service Account مع صلاحية Firestore (Owner/Editor على الأقل للمشروع أو دور مخصص).
+- الصق JSON كاملًا في المتغير (لا مسار ملف).
+- مجموعة التخزين الافتراضية: `live_candles`، كل وثيقة اسمها timestamp بالدقيقة.
+
 ### 3. Run the Server
 ```bash
 uvicorn app:app --host 0.0.0.0 --port 8000 --reload

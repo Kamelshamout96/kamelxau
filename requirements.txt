@@ -5,3 +5,4 @@ ta
 requests
 yfinance
 beautifulsoup4
+google-cloud-firestore

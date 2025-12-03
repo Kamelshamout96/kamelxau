@@ -1,110 +1,143 @@
 """
 Live Gold Data Collector
 ========================
-This module collects live spot gold prices at regular intervals (1-minute)
-and stores them in a database for historical analysis.
+Collects 1-minute candles from livepriceofgold.com and stores them in Firestore.
+This replaces the previous CSV-based storage to avoid losing data on deploy/restart.
 """
 
-import pandas as pd
-from pathlib import Path
-from datetime import datetime, timedelta
+import json
+import os
 import time
-from utils import get_live_gold_price_usa, DataError
+from datetime import datetime, timedelta
+from pathlib import Path
 
+import pandas as pd
+from google.cloud import firestore
+from google.oauth2 import service_account
 
-# Data storage
+from utils import DataError, get_live_gold_price_usa
+
+# Firestore setup
+FIRESTORE_PROJECT_ID = os.getenv("FIRESTORE_PROJECT_ID")
+FIRESTORE_CREDS_JSON = os.getenv("GOOGLE_CREDENTIALS_JSON")
+_db = None  # cached Firestore client
+
+# Legacy constants retained for downstream imports (not used for storage anymore)
 LIVE_DATA_DIR = Path("data")
 LIVE_DATA_DIR.mkdir(exist_ok=True)
 LIVE_DATA_FILE = LIVE_DATA_DIR / "live_gold_data.csv"
+# Firestore collection (fixed name)
+DAY_COLLECTION = "live_candles"
+
+
+def _get_db():
+    """Create or return a cached Firestore client."""
+    global _db
+    if _db is not None:
+        return _db
+
+    if not FIRESTORE_CREDS_JSON:
+        raise DataError("Missing GOOGLE_CREDENTIALS_JSON environment variable for Firestore.")
+
+    try:
+        info = json.loads(FIRESTORE_CREDS_JSON)
+        creds = service_account.Credentials.from_service_account_info(info)
+        _db = firestore.Client(project=FIRESTORE_PROJECT_ID, credentials=creds)
+        return _db
+    except Exception as exc:
+        raise DataError(f"Failed to initialize Firestore client: {exc}")
+
+
+def _day_collection(timestamp: datetime):
+    """Return the subcollection for the given day (doc per day)."""
+    day_key = timestamp.date().isoformat()  # YYYY-MM-DD
+    db = _get_db()
+    day_doc = db.collection(DAY_COLLECTION).document(day_key)
+    # Ensure day doc exists with minimal metadata
+    day_doc.set({"day": day_key}, merge=True)
+    return day_doc.collection("candles")
 
 
 def append_live_price():
     """
-    Fetch current live gold price and append it to the database
-    Creates 1-minute candles
+    Fetch current live gold price and upsert it into Firestore as a 1-minute candle.
     """
     try:
-        # Get live price
         price = get_live_gold_price_usa()
         current_time = datetime.now()
-        
-        # Round to current minute
-        timestamp = current_time.replace(microsecond=0)
-        
-        # Create new data point (1-minute candle)
-        new_data = pd.DataFrame({
-            'timestamp': [timestamp],
-            'open': [price],
-            'high': [price],
-            'low': [price],
-            'close': [price],
-            'volume': [0]
-        })
-        
-        # Load existing data or create new
-        if LIVE_DATA_FILE.exists():
-            try:
-                df = pd.read_csv(LIVE_DATA_FILE)
-            except pd.errors.EmptyDataError:
-                df = pd.DataFrame(columns=new_data.columns)
+        timestamp = current_time.replace(microsecond=0)  # minute resolution
 
-            # If columns are missing, start fresh with proper schema
-            missing_cols = [c for c in new_data.columns if c not in df.columns]
-            if missing_cols:
-                df = pd.DataFrame(columns=new_data.columns)
+        doc_ref = _day_collection(timestamp).document(timestamp.isoformat())
+        snap = doc_ref.get()
 
-            df['timestamp'] = pd.to_datetime(df['timestamp'])
-            
-            # Check if we already have this minute
-            existing = df[df['timestamp'] == timestamp]
-            if not existing.empty:
-                # Update existing candle (update high/low/close)
-                idx = existing.index[0]
-                df.loc[idx, 'close'] = price
-                df.loc[idx, 'high'] = max(df.loc[idx, 'high'], price)
-                df.loc[idx, 'low'] = min(df.loc[idx, 'low'], price)
-                print(f"[OK] Updated 1m candle at {timestamp}: ${price:.2f}")
-            else:
-                # Append new candle
-                df = pd.concat([df, new_data], ignore_index=True)
-                print(f"[OK] Added new 1m candle at {timestamp}: ${price:.2f}")
+        if snap.exists:
+            data = snap.to_dict() or {}
+            updated = {
+                "timestamp": data.get("timestamp", timestamp.isoformat()),
+                "open": data.get("open", price),
+                "high": max(data.get("high", price), price),
+                "low": min(data.get("low", price), price),
+                "close": price,
+                "volume": data.get("volume", 0),
+            }
+            status = "Updated"
         else:
-            # First time - create new file
-            df = new_data
-            print(f"[OK] Created new database with 1m candle at {timestamp}: ${price:.2f}")
-        
-        # Save to CSV
-        df.to_csv(LIVE_DATA_FILE, index=False)
-        
+            updated = {
+                "timestamp": timestamp.isoformat(),
+                "open": price,
+                "high": price,
+                "low": price,
+                "close": price,
+                "volume": 0,
+            }
+            status = "Created"
+
+        doc_ref.set(updated, merge=True)
+        print(f"[OK] {status} 1m candle at {timestamp}: ${price:.2f}")
         return price, timestamp
-        
+
     except Exception as e:
         print(f"[ERR] Error collecting live price: {e}")
         return None, None
 
 
-def get_live_collected_data():
+def get_live_collected_data(limit_per_day: int = 2000, days_back: int = 3):
     """
-    Load all collected live data
-    Returns DataFrame with 1-minute candles
+    Load collected live data from Firestore.
+
+    Args:
+        limit_per_day: Max documents to pull per day (ordered oldest->newest).
+        days_back: How many days (including today) to pull.
     """
-    if not LIVE_DATA_FILE.exists():
+    rows = []
+    today = datetime.now().date()
+
+    try:
+        for i in range(days_back):
+            day = today - timedelta(days=i)
+            col = (
+                _get_db()
+                .collection(DAY_COLLECTION)
+                .document(day.isoformat())
+                .collection("candles")
+            )
+            docs = col.order_by("timestamp").limit(limit_per_day).stream()
+            rows.extend(d.to_dict() for d in docs)
+    except Exception as exc:
+        raise DataError(f"Failed to load data from Firestore: {exc}")
+
+    if not rows:
         raise DataError("No live data collected yet. Run collector first.")
-    if LIVE_DATA_FILE.stat().st_size == 0:
-        raise DataError("Live data file is empty. Collect at least a few 1m samples first.")
 
-    df = pd.read_csv(LIVE_DATA_FILE)
+    df = pd.DataFrame(rows)
     if df.empty:
-        raise DataError("Live data file is empty. Collect at least a few 1m samples first.")
+        raise DataError("Live data is empty. Collect at least a few 1m samples first.")
 
-    # Normalize timestamp index and drop duplicates to keep resampling stable
-    if "timestamp" in df.columns:
-        df["timestamp"] = pd.to_datetime(df["timestamp"])
-        df = df.set_index("timestamp")
-    if not isinstance(df.index, pd.DatetimeIndex):
-        raise DataError("Timestamp column is missing or invalid.")
+    if "timestamp" not in df.columns:
+        raise DataError("Timestamp column is missing in Firestore data.")
 
-    df = df.sort_index()
+    df["timestamp"] = pd.to_datetime(df["timestamp"])
+    df = df.set_index("timestamp").sort_index()
     df = df[~df.index.duplicated(keep="last")]
 
     # Drop obvious outlier price spikes only (keep zero-volume rows allowed by design)
