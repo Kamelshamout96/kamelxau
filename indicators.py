@@ -25,8 +25,9 @@ def add_all_indicators(df: pd.DataFrame) -> pd.DataFrame:
         ema_long = max(1, min(20, data_len - 1))
         rsi_period = max(1, min(7, data_len - 1))
         stoch_period = max(1, min(7, data_len - 1))
-        adx_period = max(1, min(7, data_len - 1))
-        atr_period = max(1, min(7, data_len - 1))
+        # Clamp ADX/ATR to avoid ta index errors on tiny datasets
+        adx_period = max(1, min(5, data_len - 2))
+        atr_period = max(1, min(5, data_len - 2))
         don_period = max(1, min(10, data_len - 1))
         print(f"  Limited data mode: Using shorter periods (EMA{ema_short}/{ema_long})")
     elif data_len < 200:
@@ -86,10 +87,8 @@ def add_all_indicators(df: pd.DataFrame) -> pd.DataFrame:
     st_period = max(1, min(10, data_len - 1))
     df = add_supertrend(df, period=st_period, multiplier=3)
 
-    result = df.dropna()
-    if result.empty:
-        # fallback: forward/backward fill to allow minimal datasets
-        result = df.fillna(method="ffill").fillna(method="bfill")
+    # Keep rows even with initial NaNs by forward/backward filling
+    result = df.fillna(method="ffill").fillna(method="bfill")
     return result
 
 

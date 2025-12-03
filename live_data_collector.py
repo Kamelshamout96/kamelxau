@@ -81,11 +81,28 @@ def get_live_collected_data():
     """
     if not LIVE_DATA_FILE.exists():
         raise DataError("No live data collected yet. Run collector first.")
-    
+    if LIVE_DATA_FILE.stat().st_size == 0:
+        raise DataError("Live data file is empty. Collect at least a few 1m samples first.")
+
     df = pd.read_csv(LIVE_DATA_FILE)
-    df['timestamp'] = pd.to_datetime(df['timestamp'])
-    df = df.set_index('timestamp').sort_index()
-    
+    if df.empty:
+        raise DataError("Live data file is empty. Collect at least a few 1m samples first.")
+
+    # Normalize timestamp index and drop duplicates to keep resampling stable
+    if "timestamp" in df.columns:
+        df["timestamp"] = pd.to_datetime(df["timestamp"])
+        df = df.set_index("timestamp")
+    if not isinstance(df.index, pd.DatetimeIndex):
+        raise DataError("Timestamp column is missing or invalid.")
+
+    df = df.sort_index()
+    df = df[~df.index.duplicated(keep="last")]
+
+    # Drop obvious bad/outlier rows (zero volume or extreme price spikes)
+    if "volume" in df.columns:
+        df = df[df["volume"] > 0]
+    df = df[df["close"] < 3000]
+
     return df
 
 
@@ -97,6 +114,21 @@ def build_timeframe_candles(df_1m, timeframe):
         df_1m: DataFrame with 1-minute candles
         timeframe: '5min', '15min', '60min', '240min', '1D'
     """
+    if df_1m is None or len(df_1m) == 0:
+        raise DataError("No 1m data available to resample.")
+
+    # Ensure datetime index
+    if not isinstance(df_1m.index, pd.DatetimeIndex):
+        if "timestamp" in df_1m.columns:
+            df_1m = df_1m.copy()
+            df_1m["timestamp"] = pd.to_datetime(df_1m["timestamp"])
+            df_1m = df_1m.set_index("timestamp")
+        else:
+            raise DataError("Data must have a DatetimeIndex or a 'timestamp' column.")
+
+    df_1m = df_1m.sort_index()
+    df_1m = df_1m[~df_1m.index.duplicated(keep="last")]
+
     if len(df_1m) < 10:
         raise DataError(f"Not enough 1m data: {len(df_1m)} rows")
     
@@ -112,6 +144,9 @@ def build_timeframe_candles(df_1m, timeframe):
         'close': 'last',
         'volume': 'sum'
     }).dropna()
+
+    if candles.empty:
+        raise DataError(f"No candles produced when resampling to {timeframe}. Need more 1m data.")
 
     return candles
 
