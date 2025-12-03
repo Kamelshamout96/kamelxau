@@ -43,7 +43,16 @@ def append_live_price():
         
         # Load existing data or create new
         if LIVE_DATA_FILE.exists():
-            df = pd.read_csv(LIVE_DATA_FILE)
+            try:
+                df = pd.read_csv(LIVE_DATA_FILE)
+            except pd.errors.EmptyDataError:
+                df = pd.DataFrame(columns=new_data.columns)
+
+            # If columns are missing, start fresh with proper schema
+            missing_cols = [c for c in new_data.columns if c not in df.columns]
+            if missing_cols:
+                df = pd.DataFrame(columns=new_data.columns)
+
             df['timestamp'] = pd.to_datetime(df['timestamp'])
             
             # Check if we already have this minute
@@ -54,15 +63,15 @@ def append_live_price():
                 df.loc[idx, 'close'] = price
                 df.loc[idx, 'high'] = max(df.loc[idx, 'high'], price)
                 df.loc[idx, 'low'] = min(df.loc[idx, 'low'], price)
-                print(f"✓ Updated 1m candle at {timestamp}: ${price:.2f}")
+                print(f"[OK] Updated 1m candle at {timestamp}: ${price:.2f}")
             else:
                 # Append new candle
                 df = pd.concat([df, new_data], ignore_index=True)
-                print(f"✓ Added new 1m candle at {timestamp}: ${price:.2f}")
+                print(f"[OK] Added new 1m candle at {timestamp}: ${price:.2f}")
         else:
             # First time - create new file
             df = new_data
-            print(f"✓ Created new database with 1m candle at {timestamp}: ${price:.2f}")
+            print(f"[OK] Created new database with 1m candle at {timestamp}: ${price:.2f}")
         
         # Save to CSV
         df.to_csv(LIVE_DATA_FILE, index=False)
@@ -70,7 +79,7 @@ def append_live_price():
         return price, timestamp
         
     except Exception as e:
-        print(f"✗ Error collecting live price: {e}")
+        print(f"[ERR] Error collecting live price: {e}")
         return None, None
 
 
@@ -98,10 +107,8 @@ def get_live_collected_data():
     df = df.sort_index()
     df = df[~df.index.duplicated(keep="last")]
 
-    # Drop obvious bad/outlier rows (zero volume or extreme price spikes)
-    if "volume" in df.columns:
-        df = df[df["volume"] > 0]
-    df = df[df["close"] < 3000]
+    # Drop obvious outlier price spikes only (keep zero-volume rows allowed by design)
+    df = df[df["close"] < 1_000_000]
 
     return df
 
