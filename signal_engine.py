@@ -137,7 +137,7 @@ def check_entry(df_5m, df_15m, df_1h, df_4h):
             return {
                 "action": "BUY",
                 "confidence": "HIGH",
-                "confidence_emoji": "??????",
+                "confidence_emoji": "⭐⭐⭐",
                 "entry": float(price),
                 "sl": sl,
                 "tp": tp,
@@ -150,7 +150,7 @@ def check_entry(df_5m, df_15m, df_1h, df_4h):
             return {
                 "action": "BUY",
                 "confidence": "MEDIUM",
-                "confidence_emoji": "????",
+                "confidence_emoji": "⭐⭐",
                 "entry": float(price),
                 "sl": sl,
                 "tp": tp,
@@ -163,7 +163,7 @@ def check_entry(df_5m, df_15m, df_1h, df_4h):
             return {
                 "action": "BUY",
                 "confidence": "LOW",
-                "confidence_emoji": "??",
+                "confidence_emoji": "⭐",
                 "entry": float(price),
                 "sl": sl,
                 "tp": tp,
@@ -206,7 +206,7 @@ def check_entry(df_5m, df_15m, df_1h, df_4h):
             return {
                 "action": "SELL",
                 "confidence": "HIGH",
-                "confidence_emoji": "??????",
+                "confidence_emoji": "⭐⭐⭐",
                 "entry": float(price),
                 "sl": sl,
                 "tp": tp,
@@ -219,7 +219,7 @@ def check_entry(df_5m, df_15m, df_1h, df_4h):
             return {
                 "action": "SELL",
                 "confidence": "MEDIUM",
-                "confidence_emoji": "????",
+                "confidence_emoji": "⭐⭐",
                 "entry": float(price),
                 "sl": sl,
                 "tp": tp,
@@ -232,7 +232,7 @@ def check_entry(df_5m, df_15m, df_1h, df_4h):
             return {
                 "action": "SELL",
                 "confidence": "LOW",
-                "confidence_emoji": "??",
+                "confidence_emoji": "⭐",
                 "entry": float(price),
                 "sl": sl,
                 "tp": tp,
@@ -422,7 +422,7 @@ def check_golden_entry(df_5m, df_15m, df_1h, df_4h):
             return {
                 "action": "BUY",
                 "confidence": "HIGH",
-                "confidence_emoji": "??????",
+                "confidence_emoji": "⭐⭐⭐",
                 "signal_type": "GOLDEN",
                 "entry": float(last5["close"]),
                 "sl": sl,
@@ -447,7 +447,7 @@ def check_golden_entry(df_5m, df_15m, df_1h, df_4h):
             return {
                 "action": "SELL",
                 "confidence": "HIGH",
-                "confidence_emoji": "??????",
+                "confidence_emoji": "⭐⭐⭐",
                 "signal_type": "GOLDEN",
                 "entry": float(last5["close"]),
                 "sl": sl,
@@ -462,3 +462,4 @@ def check_golden_entry(df_5m, df_15m, df_1h, df_4h):
         "market_status": status_msg,
         "signal_type": "GOLDEN",
     }
+
