@@ -86,8 +86,8 @@ def health():
 def live_length():
     """Return count and time range of collected 1m live data."""
     try:
-        # Fetch up to ~48h (2 days) of 1m data to cover recent history
-        df = get_live_collected_data(limit_per_day=5000, days_back=2)
+        # Fetch last 40 days (~50k rows) for a broader view
+        df = get_live_collected_data(limit=50000, days_back=40)
         return {
             "count": int(len(df)),
             "first": df.index[0].isoformat(),
@@ -105,7 +105,8 @@ def run_signal():
         append_live_price()
 
         # Load collected 1-minute candles from web scraping
-        hist = get_live_collected_data()
+        # Use a wide window to satisfy higher TF indicators (4H EMA200 needs ~33 days)
+        hist = get_live_collected_data(limit=50000, days_back=40)
 
         # Build higher timeframes
         candles_5m = build_timeframe_candles(hist, "5min")

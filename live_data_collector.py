@@ -1,7 +1,7 @@
 """
 Live Gold Data Collector
 ========================
-Collects 1-minute candles from livepriceofgold.com and stores them in Firestore.
+Collects 1-minute candles from livepriceofgold.com and stores them in Google Sheets.
 This replaces the previous CSV-based storage to avoid losing data on deploy/restart.
 """
 
@@ -13,86 +13,98 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import pandas as pd
-from google.cloud import firestore
-from google.oauth2 import service_account
+import gspread
+from google.oauth2.service_account import Credentials
 
 from utils import DataError, get_live_gold_price_usa
 
-# Firestore setup
-FIRESTORE_PROJECT_ID = os.getenv("FIRESTORE_PROJECT_ID")
-FIRESTORE_CREDS_JSON = os.getenv("GOOGLE_CREDENTIALS_JSON")
-FIRESTORE_CREDS_FILE = os.getenv("GOOGLE_CREDENTIALS_FILE") or os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
-_db = None  # cached Firestore client
+# Simple in-process cache to reduce external reads (Sheets API quotas)
+CACHE_TTL_SECONDS = 300  # 5 minutes
+_data_cache = {}  # key: (limit, days_back) -> {"ts": float, "df": DataFrame}
+
+# Google Sheets setup
+SHEETS_ID = os.getenv("GOOGLE_SHEETS_ID") or os.getenv("GOOGLE_SHEET_ID")
+GOOGLE_CREDS_JSON = os.getenv("GOOGLE_CREDENTIALS_JSON")
+GOOGLE_CREDS_FILE = os.getenv("GOOGLE_CREDENTIALS_FILE") or os.getenv("GOOGLE_APPLICATION_CREDENTIALS") or str(Path("data") / "blissful-shore-480201-b1-6ec756a16a9e.json")
+WORKSHEET_NAME = os.getenv("GOOGLE_SHEETS_WORKSHEET", "live_candles")
+_sheet = None  # cached worksheet client
+SHEETS_ID_FILE = Path("data/google_sheet_id.json")
 
 # Legacy constants retained for downstream imports (not used for storage anymore)
 LIVE_DATA_DIR = Path("data")
 LIVE_DATA_DIR.mkdir(exist_ok=True)
 LIVE_DATA_FILE = LIVE_DATA_DIR / "live_gold_data.csv"
-# Firestore collection (fixed name)
-DAY_COLLECTION = "live_candles"
 
 
-def _get_db():
-    """Create or return a cached Firestore client."""
-    global _db
-    if _db is not None:
-        return _db
+def _get_sheet():
+    """Create or return a cached Google Sheet worksheet."""
+    global _sheet, SHEETS_ID
+    if _sheet is not None:
+        return _sheet
 
-    # Resolve credentials: env JSON > env file path > default local file
+    if not SHEETS_ID:
+        # Optional fallback: read from JSON file data/google_sheet_id.json
+        if SHEETS_ID_FILE.exists():
+            try:
+                sheet_info = json.loads(SHEETS_ID_FILE.read_text(encoding="utf-8"))
+                SHEETS_ID = sheet_info.get("GOOGLE_SHEETS_ID") or sheet_info.get("sheet_id") or sheet_info.get("id")
+            except Exception as exc:
+                raise DataError(f"Failed to read Google Sheets ID from {SHEETS_ID_FILE}: {exc}")
+    if not SHEETS_ID:
+        raise DataError("Missing GOOGLE_SHEETS_ID (or GOOGLE_SHEET_ID) environment variable, and no sheet id found in data/google_sheet_id.json.")
+
     info = None
     cred_path = None
-
-    if FIRESTORE_CREDS_JSON:
+    if GOOGLE_CREDS_JSON:
         try:
-            info = json.loads(FIRESTORE_CREDS_JSON.strip())
+            info = json.loads(GOOGLE_CREDS_JSON.strip())
         except Exception as exc:
             raise DataError(f"Invalid JSON in GOOGLE_CREDENTIALS_JSON: {exc}")
     else:
-        if FIRESTORE_CREDS_FILE:
-            cred_path = Path(FIRESTORE_CREDS_FILE)
+        if GOOGLE_CREDS_FILE:
+            cred_path = Path(GOOGLE_CREDS_FILE)
         else:
-            default_path = Path("data/firebase_creds.json")
+            default_path = Path("data/blissful-shore-480201-b1-6ec756a16a9e.json")
             cred_path = default_path if default_path.exists() else None
-
         if cred_path:
             if not cred_path.exists():
-                raise DataError(f"Firestore credentials file not found at {cred_path}")
-            try:
-                raw = cred_path.read_text(encoding="utf-8-sig").strip()
-                if not raw:
-                    raise DataError(f"Credentials file {cred_path} is empty")
-                info = json.loads(raw)
-            except Exception as exc:
-                raise DataError(f"Invalid JSON in credentials file {cred_path}: {exc}")
-
+                raise DataError(f"Google credentials file not found at {cred_path}")
+            raw = cred_path.read_text(encoding="utf-8-sig").strip()
+            if not raw:
+                raise DataError(f"Credentials file {cred_path} is empty")
+            info = json.loads(raw)
     if info is None:
         raise DataError(
-            "Missing Firestore credentials. Set GOOGLE_CREDENTIALS_JSON or "
+            "Missing Google credentials. Set GOOGLE_CREDENTIALS_JSON or "
             "GOOGLE_CREDENTIALS_FILE/GOOGLE_APPLICATION_CREDENTIALS, or place "
             "data/firebase_creds.json with your service account JSON."
         )
 
     try:
-        creds = service_account.Credentials.from_service_account_info(info)
-        _db = firestore.Client(project=FIRESTORE_PROJECT_ID, credentials=creds)
-        return _db
+        scopes = [
+            "https://www.googleapis.com/auth/spreadsheets",
+            "https://www.googleapis.com/auth/drive",
+        ]
+        creds = Credentials.from_service_account_info(info, scopes=scopes)
+        client = gspread.authorize(creds)
+        sh = client.open_by_key(SHEETS_ID)
+        try:
+            ws = sh.worksheet(WORKSHEET_NAME)
+        except gspread.WorksheetNotFound:
+            ws = sh.add_worksheet(title=WORKSHEET_NAME, rows="1000", cols="10")
+        headers = ["timestamp", "open", "high", "low", "close", "volume"]
+        current = [c.lower() for c in ws.row_values(1)]
+        if current != headers:
+            ws.update("A1:F1", [headers])
+        _sheet = ws
+        return _sheet
     except Exception as exc:
-        raise DataError(f"Failed to initialize Firestore client: {exc}")
-
-
-def _day_collection(timestamp: datetime):
-    """Return the subcollection for the given day (doc per day)."""
-    day_key = timestamp.date().isoformat()  # YYYY-MM-DD
-    db = _get_db()
-    day_doc = db.collection(DAY_COLLECTION).document(day_key)
-    # Ensure day doc exists with minimal metadata
-    day_doc.set({"day": day_key}, merge=True)
-    return day_doc.collection("candles")
+        raise DataError(f"Failed to initialize Google Sheets client: {exc}")
 
 
 def append_live_price():
     """
-    Fetch current live gold price and upsert it into Firestore as a 1-minute candle.
+    Fetch current live gold price and append it into Sheets as a 1-minute candle.
     """
     try:
         price = get_live_gold_price_usa()
@@ -100,33 +112,20 @@ def append_live_price():
         current_time = datetime.now(ZoneInfo("Asia/Riyadh"))
         timestamp = current_time.replace(microsecond=0)  # minute resolution
 
-        doc_ref = _day_collection(timestamp).document(timestamp.isoformat())
-        snap = doc_ref.get()
-
-        if snap.exists:
-            data = snap.to_dict() or {}
-            updated = {
-                "timestamp": data.get("timestamp", timestamp.isoformat()),
-                "open": data.get("open", price),
-                "high": max(data.get("high", price), price),
-                "low": min(data.get("low", price), price),
-                "close": price,
-                "volume": data.get("volume", 0),
-            }
-            status = "Updated"
-        else:
-            updated = {
-                "timestamp": timestamp.isoformat(),
-                "open": price,
-                "high": price,
-                "low": price,
-                "close": price,
-                "volume": 0,
-            }
-            status = "Created"
-
-        doc_ref.set(updated, merge=True)
-        print(f"[OK] {status} 1m candle at {timestamp}: ${price:.2f}")
+        ws = _get_sheet()
+        ws.append_row(
+            [
+                timestamp.isoformat(),
+                price,
+                price,
+                price,
+                price,
+                0,
+            ],
+            value_input_option="RAW",
+        )
+        print(f"[OK] Appended 1m candle at {timestamp}: ${price:.2f}")
+        _data_cache.clear()
         return price, timestamp
 
     except Exception as e:
@@ -134,30 +133,25 @@ def append_live_price():
         return None, None
 
 
-def get_live_collected_data(limit_per_day: int = 2000, days_back: int = 3):
+def get_live_collected_data(limit: int = 50000, days_back: int = 40):
     """
-    Load collected live data from Firestore.
+    Load collected live data from Sheets.
 
     Args:
-        limit_per_day: Max documents to pull per day (ordered oldest->newest).
-        days_back: How many days (including today) to pull.
+        limit: Max total rows to return (latest). Defaults to ~50k to cover 4H EMA200.
+        days_back: Ignored for Sheets (kept for compatibility).
     """
-    rows = []
-    today = datetime.now().date()
+    cache_key = (limit, days_back)
+    now_ts = time.time()
+    cached = _data_cache.get(cache_key)
+    if cached and now_ts - cached["ts"] < CACHE_TTL_SECONDS:
+        return cached["df"].copy()
 
     try:
-        for i in range(days_back):
-            day = today - timedelta(days=i)
-            col = (
-                _get_db()
-                .collection(DAY_COLLECTION)
-                .document(day.isoformat())
-                .collection("candles")
-            )
-            docs = col.order_by("timestamp").limit(limit_per_day).stream()
-            rows.extend(d.to_dict() for d in docs)
+        ws = _get_sheet()
+        rows = ws.get_all_records()
     except Exception as exc:
-        raise DataError(f"Failed to load data from Firestore: {exc}")
+        raise DataError(f"Failed to load data from Sheets: {exc}")
 
     if not rows:
         raise DataError("No live data collected yet. Run collector first.")
@@ -178,7 +172,13 @@ def get_live_collected_data(limit_per_day: int = 2000, days_back: int = 3):
     df["timestamp"] = df["timestamp"].dt.tz_convert("Asia/Riyadh")
 
     df = df.set_index("timestamp").sort_index()
+    # Keep only the latest {limit} rows overall
+    if limit and len(df) > limit:
+        df = df.tail(limit)
     df = df[~df.index.duplicated(keep="last")]
+
+    # Cache result
+    _data_cache[cache_key] = {"ts": now_ts, "df": df}
 
     # Drop obvious outlier price spikes only (keep zero-volume rows allowed by design)
     df = df[df["close"] < 1_000_000]
