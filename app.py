@@ -190,15 +190,15 @@ def run_signal():
                     print(f"[warn] failed to log signal: {e}")
 
             msg = (
-                f"<b>{title}</b>\\n"
-                f"Confidence: {confidence} {confidence_emoji}\\n"
-                f"Type: {signal_type}\\n"
-                f"Timeframe: {signal.get('timeframe', 'N/A')}\\n"
-                f"Trend: {signal.get('market_status', 'N/A')}\\n"
-                f"Entry: {signal['entry']:.2f}\\n"
-                f"SL: {signal['sl']:.2f}\\n"
-                f"TP: {signal['tp']:.2f}\\n"
-                f"Notes: {confidence_text}"
+                f"🚀 <b>{title}</b>\\n"
+                f"🔖 Confidence: {confidence} {confidence_emoji}\\n"
+                f"🧭 Type: {signal_type}\\n"
+                f"⏱ Timeframe: {signal.get('timeframe', 'N/A')}\\n"
+                f"📈 Trend: {signal.get('market_status', 'N/A')}\\n"
+                f"🎯 Entry: {signal['entry']:.2f}\\n"
+                f"🛑 SL: {signal['sl']:.2f}\\n"
+                f"✅ TP: {signal['tp']:.2f}\\n"
+                f"🗒 Notes: {confidence_text}"
             )
             if not already_sent:
                 send_telegram(TG_TOKEN, TG_CHAT, msg)

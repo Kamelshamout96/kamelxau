@@ -51,7 +51,7 @@ def _get_sheet():
             except Exception as exc:
                 raise DataError(f"Failed to read Google Sheets ID from {SHEETS_ID_FILE}: {exc}")
     if not SHEETS_ID:
-        raise DataError("Missing GOOGLE_SHEETS_ID (or GOOGLE_SHEET_ID) environment variable, and no sheet id found in data/google_sheet_id.json.")
+        raise DataError("❌ Missing GOOGLE_SHEETS_ID (or GOOGLE_SHEET_ID) environment variable, and no sheet id found in data/google_sheet_id.json.")
 
     info = None
     cred_path = None
