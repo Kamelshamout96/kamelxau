@@ -134,17 +134,17 @@ def run_signal():
             if TG_TOKEN and TG_CHAT:
                 send_telegram(TG_TOKEN, TG_CHAT, f"{title}\n{body}")
 
-        if signal.get("action") == "NO_TRADE":
-            status = signal.get("market_status", "N/A")
-            reason = signal.get("reason", "N/A")
-            body = (
-                f"Status: {status}\n"
-                f"Reason: {reason}\n"
-                f"Last price: ${latest_price:.2f}"
-            )
-            _send_alert("[POTENTIAL SETUP]", body)
-            if "trend" in reason.lower() or "trend" in status.lower():
-                _send_alert("[TREND ALERT]", f"{status}\nLast price: ${latest_price:.2f}")
+        # if signal.get("action") == "NO_TRADE":
+        #     status = signal.get("market_status", "N/A")
+        #     reason = signal.get("reason", "N/A")
+        #     body = (
+        #         f"Status: {status}\n"
+        #         f"Reason: {reason}\n"
+        #         f"Last price: ${latest_price:.2f}"
+        #     )
+        #     _send_alert("[POTENTIAL SETUP]", body)
+        #     if "trend" in reason.lower() or "trend" in status.lower():
+        #         _send_alert("[TREND ALERT]", f"{status}\nLast price: ${latest_price:.2f}")
 
         # Send Telegram if a trade exists
         if signal.get("action") in ("BUY", "SELL"):
