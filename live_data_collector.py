@@ -10,6 +10,7 @@ import os
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 from google.cloud import firestore
@@ -20,6 +21,7 @@ from utils import DataError, get_live_gold_price_usa
 # Firestore setup
 FIRESTORE_PROJECT_ID = os.getenv("FIRESTORE_PROJECT_ID")
 FIRESTORE_CREDS_JSON = os.getenv("GOOGLE_CREDENTIALS_JSON")
+FIRESTORE_CREDS_FILE = os.getenv("GOOGLE_CREDENTIALS_FILE") or os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
 _db = None  # cached Firestore client
 
 # Legacy constants retained for downstream imports (not used for storage anymore)
@@ -36,11 +38,41 @@ def _get_db():
     if _db is not None:
         return _db
 
-    if not FIRESTORE_CREDS_JSON:
-        raise DataError("Missing GOOGLE_CREDENTIALS_JSON environment variable for Firestore.")
+    # Resolve credentials: env JSON > env file path > default local file
+    info = None
+    cred_path = None
+
+    if FIRESTORE_CREDS_JSON:
+        try:
+            info = json.loads(FIRESTORE_CREDS_JSON.strip())
+        except Exception as exc:
+            raise DataError(f"Invalid JSON in GOOGLE_CREDENTIALS_JSON: {exc}")
+    else:
+        if FIRESTORE_CREDS_FILE:
+            cred_path = Path(FIRESTORE_CREDS_FILE)
+        else:
+            default_path = Path("data/firebase_creds.json")
+            cred_path = default_path if default_path.exists() else None
+
+        if cred_path:
+            if not cred_path.exists():
+                raise DataError(f"Firestore credentials file not found at {cred_path}")
+            try:
+                raw = cred_path.read_text(encoding="utf-8-sig").strip()
+                if not raw:
+                    raise DataError(f"Credentials file {cred_path} is empty")
+                info = json.loads(raw)
+            except Exception as exc:
+                raise DataError(f"Invalid JSON in credentials file {cred_path}: {exc}")
+
+    if info is None:
+        raise DataError(
+            "Missing Firestore credentials. Set GOOGLE_CREDENTIALS_JSON or "
+            "GOOGLE_CREDENTIALS_FILE/GOOGLE_APPLICATION_CREDENTIALS, or place "
+            "data/firebase_creds.json with your service account JSON."
+        )
 
     try:
-        info = json.loads(FIRESTORE_CREDS_JSON)
         creds = service_account.Credentials.from_service_account_info(info)
         _db = firestore.Client(project=FIRESTORE_PROJECT_ID, credentials=creds)
         return _db
@@ -64,7 +96,8 @@ def append_live_price():
     """
     try:
         price = get_live_gold_price_usa()
-        current_time = datetime.now()
+        # Use Riyadh local time for storage (tz-aware) then store ISO with offset
+        current_time = datetime.now(ZoneInfo("Asia/Riyadh"))
         timestamp = current_time.replace(microsecond=0)  # minute resolution
 
         doc_ref = _day_collection(timestamp).document(timestamp.isoformat())
@@ -136,7 +169,14 @@ def get_live_collected_data(limit_per_day: int = 2000, days_back: int = 3):
     if "timestamp" not in df.columns:
         raise DataError("Timestamp column is missing in Firestore data.")
 
-    df["timestamp"] = pd.to_datetime(df["timestamp"])
+    # Robust ISO parsing with timezone support (+03:00). Coerce bad rows out.
+    df["timestamp"] = pd.to_datetime(
+        df["timestamp"], format="ISO8601", errors="coerce", utc=True
+    )
+    df = df.dropna(subset=["timestamp"])
+    # Normalize to Riyadh tz for consistency
+    df["timestamp"] = df["timestamp"].dt.tz_convert("Asia/Riyadh")
+
     df = df.set_index("timestamp").sort_index()
     df = df[~df.index.duplicated(keep="last")]
 

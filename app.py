@@ -86,7 +86,8 @@ def health():
 def live_length():
     """Return count and time range of collected 1m live data."""
     try:
-        df = get_live_collected_data()
+        # Fetch up to ~48h (2 days) of 1m data to cover recent history
+        df = get_live_collected_data(limit_per_day=5000, days_back=2)
         return {
             "count": int(len(df)),
             "first": df.index[0].isoformat(),
