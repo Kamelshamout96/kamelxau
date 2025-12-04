@@ -6,13 +6,29 @@ def _trend(row):
     return "neutral"
 
 
-def calculate_sl_tp(entry, atr, direction, sl_atr_mult=0.6, tp_atr_mult=1.0, max_dist=7.0):
+def calculate_sl_tp(
+    entry,
+    atr,
+    direction,
+    sl_atr_mult=0.6,
+    tp_atr_mult=1.0,
+    max_dist=7.0,
+    sl_atr=None,
+    sl_max_dist=None,
+    tp_atr=None,
+    tp_max_dist=None,
+):
     """
-    Calculate SL and TP with a maximum distance cap for scalp trades.
-    max_dist=7.0 corresponds to 70 pips (1 pip = $0.10).
+    Calculate SL and TP with optional separate ATR sources/caps for stop and target.
+    max_dist keeps backward compatibility when explicit caps are not provided.
     """
-    sl_dist = min(atr * sl_atr_mult, max_dist)
-    tp_dist = min(atr * tp_atr_mult, max_dist)
+    sl_src_atr = sl_atr if sl_atr is not None else atr
+    tp_src_atr = tp_atr if tp_atr is not None else atr
+    sl_cap = sl_max_dist if sl_max_dist is not None else max_dist
+    tp_cap = tp_max_dist if tp_max_dist is not None else max_dist
+
+    sl_dist = min(sl_src_atr * sl_atr_mult, sl_cap)
+    tp_dist = min(tp_src_atr * tp_atr_mult, tp_cap)
     
     if direction == "BUY":
         sl = entry - sl_dist
@@ -71,6 +87,10 @@ def check_entry(df_5m, df_15m, df_1h, df_4h):
     trend_1h = _trend(last1h)
     trend_4h = _trend(last4h)
     mid_trend = _trend(last15)
+    sl_atr = float(last1h.get("atr", last5.get("atr", 0)))
+    tp_atr = float(last5.get("atr", sl_atr if sl_atr else 0))
+    if sl_atr <= 0:
+        sl_atr = tp_atr
 
     status_msg = (
         f"Trend 4H/1H/15m: {trend_4h}/{trend_1h}/{mid_trend} | "
@@ -101,6 +121,18 @@ def check_entry(df_5m, df_15m, df_1h, df_4h):
     # Slightly lower ADX threshold to allow trades in moderate momentum
     adx_ok = last5["adx"] >= 15
     over_extension = abs(price - ema50) / price
+    # Use higher timeframe ATR for SL (safer) and 5m ATR for TP (tighter)
+    def _calc_sl_tp(direction):
+        return calculate_sl_tp(
+            price,
+            tp_atr,
+            direction,
+            sl_atr_mult=1.0,
+            tp_atr_mult=1.0,
+            sl_atr=sl_atr,
+            sl_max_dist=20.0,
+            tp_max_dist=7.0,
+        )
 
     # BUY setup
     if main_trend == "bullish":
@@ -133,7 +165,7 @@ def check_entry(df_5m, df_15m, df_1h, df_4h):
         )
 
         if strict_buy:
-            sl, tp = calculate_sl_tp(price, last5["atr"], "BUY")
+            sl, tp = _calc_sl_tp("BUY")
             return {
                 "action": "BUY",
                 "confidence": "HIGH",
@@ -146,7 +178,7 @@ def check_entry(df_5m, df_15m, df_1h, df_4h):
                 "signal_type": "SCALP",
             }
         if relaxed_buy:
-            sl, tp = calculate_sl_tp(price, last5["atr"], "BUY")
+            sl, tp = _calc_sl_tp("BUY")
             return {
                 "action": "BUY",
                 "confidence": "MEDIUM",
@@ -159,7 +191,7 @@ def check_entry(df_5m, df_15m, df_1h, df_4h):
                 "signal_type": "SCALP",
             }
         if fallback_buy:
-            sl, tp = calculate_sl_tp(price, last5["atr"], "BUY")
+            sl, tp = _calc_sl_tp("BUY")
             return {
                 "action": "BUY",
                 "confidence": "LOW",
@@ -202,7 +234,7 @@ def check_entry(df_5m, df_15m, df_1h, df_4h):
         )
 
         if strict_sell:
-            sl, tp = calculate_sl_tp(price, last5["atr"], "SELL")
+            sl, tp = _calc_sl_tp("SELL")
             return {
                 "action": "SELL",
                 "confidence": "HIGH",
@@ -215,7 +247,7 @@ def check_entry(df_5m, df_15m, df_1h, df_4h):
                 "signal_type": "SCALP",
             }
         if relaxed_sell:
-            sl, tp = calculate_sl_tp(price, last5["atr"], "SELL")
+            sl, tp = _calc_sl_tp("SELL")
             return {
                 "action": "SELL",
                 "confidence": "MEDIUM",
@@ -228,7 +260,7 @@ def check_entry(df_5m, df_15m, df_1h, df_4h):
                 "signal_type": "SCALP",
             }
         if fallback_sell:
-            sl, tp = calculate_sl_tp(price, last5["atr"], "SELL")
+            sl, tp = _calc_sl_tp("SELL")
             return {
                 "action": "SELL",
                 "confidence": "LOW",
@@ -272,6 +304,18 @@ def check_supertrend_entry(df_5m, df_15m, df_1h, df_4h):
     last15 = df_15m.iloc[-1]
     last1h = df_1h.iloc[-1]
     last4h = df_4h.iloc[-1]
+    sl_atr = float(last1h.get("atr", last5.get("atr", 0)))
+    tp_atr = float(last5.get("atr", sl_atr if sl_atr else 0))
+    if sl_atr <= 0:
+        sl_atr = tp_atr
+    sl_atr = float(last1h.get("atr", last5.get("atr", 0)))
+    tp_atr = float(last5.get("atr", sl_atr if sl_atr else 0))
+    if sl_atr <= 0:
+        sl_atr = tp_atr
+    sl_atr = float(last1h.get("atr", last5.get("atr", 0)))
+    tp_atr = float(last5.get("atr", sl_atr if sl_atr else 0))
+    if sl_atr <= 0:
+        sl_atr = tp_atr
     
     # Check if SuperTrend columns exist
     if 'supertrend_direction' not in last5.index:
@@ -304,7 +348,16 @@ def check_supertrend_entry(df_5m, df_15m, df_1h, df_4h):
     
     # BUY Signal: All higher timeframes bullish (direction = 1)
     if st_4h == 1 and st_1h == 1 and st_15m == 1 and st_5m == 1:
-        sl, tp = calculate_sl_tp(last5["close"], last5["atr"], "BUY")
+        sl, tp = calculate_sl_tp(
+            last5["close"],
+            tp_atr,
+            "BUY",
+            sl_atr_mult=1.0,
+            tp_atr_mult=1.0,
+            sl_atr=sl_atr,
+            sl_max_dist=20.0,
+            tp_max_dist=7.0,
+        )
         return {
             "action": "BUY",
             "confidence": "SUPERTREND",
@@ -319,7 +372,16 @@ def check_supertrend_entry(df_5m, df_15m, df_1h, df_4h):
     
     # SELL Signal: All higher timeframes bearish (direction = -1)
     if st_4h == -1 and st_1h == -1 and st_15m == -1 and st_5m == -1:
-        sl, tp = calculate_sl_tp(last5["close"], last5["atr"], "SELL")
+        sl, tp = calculate_sl_tp(
+            last5["close"],
+            tp_atr,
+            "SELL",
+            sl_atr_mult=1.0,
+            tp_atr_mult=1.0,
+            sl_atr=sl_atr,
+            sl_max_dist=20.0,
+            tp_max_dist=7.0,
+        )
         return {
             "action": "SELL",
             "confidence": "SUPERTREND",
@@ -418,7 +480,16 @@ def check_golden_entry(df_5m, df_15m, df_1h, df_4h):
             last5["close"] >= last5["don_high"] * 0.999,  # allow tiny slack on breakout
         ]
         if all(conds):
-            sl, tp = calculate_sl_tp(last5["close"], last5["atr"], "BUY")
+            sl, tp = calculate_sl_tp(
+                last5["close"],
+                tp_atr,
+                "BUY",
+                sl_atr_mult=1.0,
+                tp_atr_mult=1.0,
+                sl_atr=sl_atr,
+                sl_max_dist=20.0,
+                tp_max_dist=7.0,
+            )
             return {
                 "action": "BUY",
                 "confidence": "HIGH",
@@ -443,7 +514,16 @@ def check_golden_entry(df_5m, df_15m, df_1h, df_4h):
             last5["close"] <= last5["don_low"],
         ]
         if all(conds):
-            sl, tp = calculate_sl_tp(last5["close"], last5["atr"], "SELL")
+            sl, tp = calculate_sl_tp(
+                last5["close"],
+                tp_atr,
+                "SELL",
+                sl_atr_mult=1.0,
+                tp_atr_mult=1.0,
+                sl_atr=sl_atr,
+                sl_max_dist=20.0,
+                tp_max_dist=7.0,
+            )
             return {
                 "action": "SELL",
                 "confidence": "HIGH",
@@ -462,4 +542,3 @@ def check_golden_entry(df_5m, df_15m, df_1h, df_4h):
         "market_status": status_msg,
         "signal_type": "GOLDEN",
     }
-
