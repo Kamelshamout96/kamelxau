@@ -128,7 +128,7 @@ def _compute_adx_conf(adx5, adx15, adx1h=None, adx4h=None):
 
 
 def _confidence_emoji(conf):
-    return "ƒ-?ƒ-?ƒ-?" if conf == "HIGH" else ("ƒ-?ƒ-?" if conf == "MEDIUM" else "ƒ-?")
+    return "⭐️⭐️⭐️" if conf == "HIGH" else ("⭐️⭐️" if conf == "MEDIUM" else "⭐️")
 
 
 def check_entry(df_5m, df_15m, df_1h, df_4h):
@@ -278,7 +278,7 @@ def check_entry(df_5m, df_15m, df_1h, df_4h):
 
 def check_supertrend_entry(df_5m, df_15m, df_1h, df_4h):
     """
-    SuperTrend-only signals (Simple & Fast) with strict ADX gating.
+    SuperTrend-only signals (Simple & Fast) with strict ADX gating and PA confirmations.
     """
     if len(df_5m) == 0 or len(df_15m) == 0 or len(df_1h) == 0 or len(df_4h) == 0:
         return {
@@ -292,16 +292,19 @@ def check_supertrend_entry(df_5m, df_15m, df_1h, df_4h):
     last15 = df_15m.iloc[-1]
     last1h = df_1h.iloc[-1]
     last4h = df_4h.iloc[-1]
-    sl_atr = float(last1h.get("atr", last5.get("atr", 0)))
-    tp_atr = float(last5.get("atr", sl_atr if sl_atr else 0))
-    if sl_atr <= 0:
-        sl_atr = tp_atr
+    adx5_val = float(last5.get("adx", 0))
+    adx15_val = float(last15.get("adx", 0))
+    adx1h_val = float(last1h.get("adx", 0))
+    adx4h_val = float(last4h.get("adx", 0))
+    atr5 = float(last5.get("atr", 0))
+    atr15 = float(last15.get("atr", 0))
+    atr1h = float(last1h.get("atr", atr5))
 
     adx_conf, tier5, tier15, tier1h, tier4h = _compute_adx_conf(
-        float(last5.get("adx", 0)),
-        float(last15.get("adx", 0)),
-        float(last1h.get("adx", 0)),
-        float(last4h.get("adx", 0)),
+        adx5_val,
+        adx15_val,
+        adx1h_val,
+        adx4h_val,
     )
 
     if 'supertrend_direction' not in last5.index:
@@ -315,6 +318,9 @@ def check_supertrend_entry(df_5m, df_15m, df_1h, df_4h):
     st_15m = last15['supertrend_direction']
     st_1h = last1h['supertrend_direction']
     st_4h = last4h['supertrend_direction']
+    strict_align = st_4h == st_1h == st_15m == st_5m
+    majority_count = sum([st_4h == st_5m, st_1h == st_5m, st_15m == st_5m, True])  # counts 5m self-align
+    majority_mode = (not strict_align) and majority_count >= 3 and (st_4h == st_5m or st_1h == st_5m)
 
     status_msg = (
         f"SuperTrend: 4H={'UP' if st_4h == 1 else 'DOWN'}, "
@@ -326,7 +332,8 @@ def check_supertrend_entry(df_5m, df_15m, df_1h, df_4h):
     price = last5["close"]
     st_val = last5.get("supertrend", price)
     price_on_side = (price > st_val) if st_5m == 1 else (price < st_val)
-    if adx_conf == "blocked" or not price_on_side:
+    # Hard gates: ADX5m/15m, price on correct side, volatility, over-extension
+    if adx_conf == "blocked" or adx5_val < 20 or adx15_val < 20 or not price_on_side:
         return {
             "action": "NO_TRADE",
             "reason": f"SuperTrend needs stronger confirmation (adx_conf={adx_conf}, price_on_side={price_on_side})",
@@ -334,23 +341,52 @@ def check_supertrend_entry(df_5m, df_15m, df_1h, df_4h):
             "signal_type": "SUPERTREND",
         }
 
-    emoji = _confidence_emoji(adx_conf)
-
-    if st_4h == 1 and st_1h == 1 and st_15m == 1 and st_5m == 1:
-        sl, tp = calculate_sl_tp(
-            last5["close"],
-            tp_atr,
-            "BUY",
-            sl_atr_mult=1.2,
-            tp_atr_mult=1.0,
-            sl_atr=sl_atr,
-            sl_max_dist=25.0,
-            tp_max_dist=12.0,
-        )
+    # Volatility filter
+    if atr5 < atr15 * 0.6:
         return {
-            "action": "BUY",
-            "confidence": adx_conf,
-            "confidence_emoji": emoji,
+            "action": "NO_TRADE",
+            "reason": "Volatility too low for fast scalping (ATR5m < 0.6 * ATR15m)",
+            "market_status": status_msg,
+            "signal_type": "SUPERTREND",
+        }
+
+    # Over-extension protection
+    over_ext = abs(price - last5["ema50"]) / last5["ema50"]
+    ext_limit = 0.01 if adx5_val >= 25 else 0.015
+    if over_ext >= ext_limit:
+        return {
+            "action": "NO_TRADE",
+            "reason": f"Over-extended from EMA50 (over_ext={over_ext:.4f})",
+            "market_status": status_msg,
+            "signal_type": "SUPERTREND",
+        }
+
+    # Micro structure (swing) and PA confirmations
+    recent_high = df_5m["high"].tail(5).iloc[:-1].max() if len(df_5m) >= 4 else last5["high"]
+    recent_low = df_5m["low"].tail(5).iloc[:-1].min() if len(df_5m) >= 4 else last5["low"]
+    hist_now = last5["macd"] - last5["macd_signal"]
+    hist_prev = df_5m.iloc[-2]["macd"] - df_5m.iloc[-2]["macd_signal"] if len(df_5m) >= 2 else hist_now
+    rsi_prev = df_5m.iloc[-2].get("rsi", last5.get("rsi"))
+    rsi_rising = last5.get("rsi") is not None and rsi_prev is not None and last5["rsi"] > rsi_prev
+    rsi_falling = last5.get("rsi") is not None and rsi_prev is not None and last5["rsi"] < rsi_prev
+
+    score = 0
+    # Alignment score
+    if strict_align or majority_mode:
+        score += 1
+    # ADX score
+    if adx_conf in ("MEDIUM", "HIGH"):
+        score += 1
+    # MACD & RSI agreement score
+    # (direction-specific below)
+    # Micro-structure score will be added on trigger
+
+    # Directional checks
+    def make_response(action, conf, sl, tp):
+        return {
+            "action": action,
+            "confidence": conf,
+            "confidence_emoji": _confidence_emoji(conf),
             "signal_type": "SUPERTREND",
             "entry": float(last5["close"]),
             "sl": sl,
@@ -359,28 +395,79 @@ def check_supertrend_entry(df_5m, df_15m, df_1h, df_4h):
             "market_status": status_msg
         }
 
-    if st_4h == -1 and st_1h == -1 and st_15m == -1 and st_5m == -1:
-        sl, tp = calculate_sl_tp(
-            last5["close"],
-            tp_atr,
-            "SELL",
-            sl_atr_mult=1.2,
-            tp_atr_mult=1.0,
-            sl_atr=sl_atr,
-            sl_max_dist=25.0,
-            tp_max_dist=12.0,
+    # BUY
+    if st_5m == 1 and (strict_align or majority_mode):
+        pa_ok = (
+            price > recent_high
+            and (last5["stoch_k"] > last5["stoch_d"] or rsi_rising)
+            and (hist_now > 0 or hist_now > hist_prev)
         )
-        return {
-            "action": "SELL",
-            "confidence": adx_conf,
-            "confidence_emoji": emoji,
-            "signal_type": "SUPERTREND",
-            "entry": float(last5["close"]),
-            "sl": sl,
-            "tp": tp,
-            "timeframe": "5m",
-            "market_status": status_msg
-        }
+        if pa_ok:
+            score_dir = score + 1  # MACD/RSI agree
+            score_dir += 1  # micro-structure break
+            # Confidence from score
+            if score_dir >= 4:
+                score_conf = "HIGH"
+            elif score_dir == 3:
+                score_conf = "MEDIUM"
+            elif score_dir == 2:
+                score_conf = "LOW"
+            else:
+                score_conf = "LOW"
+            # Majority downgrade
+            if majority_mode and score_conf == "HIGH":
+                score_conf = "MEDIUM"
+            elif majority_mode and score_conf == "MEDIUM":
+                score_conf = "LOW"
+            # ADX boost/downgrade
+            if adx5_val >= 25:
+                score_conf = "HIGH"
+            if adx1h_val < 20 or adx4h_val < 20:
+                score_conf = "LOW"
+            # SL/TP tuned for scalping
+            sl_dist = min(atr1h * 1.0, 20.0)
+            tp_mult = 1.0 if adx5_val >= 25 or adx15_val >= 25 else 0.8
+            tp_cap = 12.0 if adx5_val >= 25 or adx15_val >= 25 else 8.0
+            tp_dist = min(atr5 * tp_mult, tp_cap)
+            sl = price - sl_dist
+            tp = price + tp_dist
+            if score_dir >= 2:
+                return make_response("BUY", score_conf, sl, tp)
+
+    # SELL
+    if st_5m == -1 and (strict_align or majority_mode):
+        pa_ok = (
+            price < recent_low
+            and (last5["stoch_k"] < last5["stoch_d"] or rsi_falling)
+            and (hist_now < 0 or hist_now < hist_prev)
+        )
+        if pa_ok:
+            score_dir = score + 1  # MACD/RSI agree
+            score_dir += 1  # micro-structure break
+            if score_dir >= 4:
+                score_conf = "HIGH"
+            elif score_dir == 3:
+                score_conf = "MEDIUM"
+            elif score_dir == 2:
+                score_conf = "LOW"
+            else:
+                score_conf = "LOW"
+            if majority_mode and score_conf == "HIGH":
+                score_conf = "MEDIUM"
+            elif majority_mode and score_conf == "MEDIUM":
+                score_conf = "LOW"
+            if adx5_val >= 25:
+                score_conf = "HIGH"
+            if adx1h_val < 20 or adx4h_val < 20:
+                score_conf = "LOW"
+            sl_dist = min(atr1h * 1.0, 20.0)
+            tp_mult = 1.0 if adx5_val >= 25 or adx15_val >= 25 else 0.8
+            tp_cap = 12.0 if adx5_val >= 25 or adx15_val >= 25 else 8.0
+            tp_dist = min(atr5 * tp_mult, tp_cap)
+            sl = price + sl_dist
+            tp = price - tp_dist
+            if score_dir >= 2:
+                return make_response("SELL", score_conf, sl, tp)
 
     return {
         "action": "NO_TRADE",
