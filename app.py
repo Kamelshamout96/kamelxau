@@ -13,7 +13,7 @@ from live_data_collector import (
 )
 from indicators import add_all_indicators
 from advanced_analysis import analyze_mtf
-from signal_engine import check_entry, check_supertrend_entry, check_ultra_entry
+from signal_engine import check_entry, check_ultra_entry, check_ultra_v3
 from signal_engine import check_golden_entry  # noqa: F401 (future use)
 
 
@@ -182,14 +182,14 @@ def run_signal():
             {"4H": df_4h, "1H": df_1h, "15m": df_15m, "5m": df_5m}
         )
         signal = check_entry(df_5m, df_15m, df_1h, df_4h)
-        if signal.get("action") == "NO_TRADE":
-            supertrend_signal = check_supertrend_entry(df_5m, df_15m, df_1h, df_4h)
-            if supertrend_signal.get("action") in ("BUY", "SELL"):
-                signal = supertrend_signal
-        # Ultra SMC signal (isolated). Use as fallback if primary is NO_TRADE.
+        # ULTRA V3 primary fallback
+        ultra_v3 = check_ultra_v3(df_5m, df_15m, df_1h, df_4h)
+        if signal.get("action") == "NO_TRADE" and ultra_v3.get("action") in ("BUY", "SELL"):
+            ultra_v3.setdefault("timeframe", "5m")
+            signal = ultra_v3
+        # ULTRA v1 secondary fallback
         ultra_signal = check_ultra_entry(df_5m, df_15m, df_1h, df_4h)
         if signal.get("action") == "NO_TRADE" and ultra_signal.get("action") in ("BUY", "SELL"):
-            # ensure timeframe for downstream formatting
             ultra_signal.setdefault("timeframe", "5m")
             signal = ultra_signal
 
@@ -250,6 +250,7 @@ def run_signal():
                 print("[info] signal already sent, skipping telegram")
 
         signal["analysis"] = analysis_summary
+        signal["ultra_v3"] = ultra_v3
         signal["ultra"] = ultra_signal
         return signal
 

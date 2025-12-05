@@ -276,207 +276,6 @@ def check_entry(df_5m, df_15m, df_1h, df_4h):
     }
 
 
-def check_supertrend_entry(df_5m, df_15m, df_1h, df_4h):
-    """
-    SuperTrend-only signals (Simple & Fast) with strict ADX gating and PA confirmations.
-    """
-    if len(df_5m) == 0 or len(df_15m) == 0 or len(df_1h) == 0 or len(df_4h) == 0:
-        return {
-            "action": "NO_TRADE",
-            "reason": "Not enough candles for SuperTrend check",
-            "signal_type": "SUPERTREND",
-            "market_status": "Waiting for multi-timeframe data",
-        }
-
-    last5 = df_5m.iloc[-1]
-    last15 = df_15m.iloc[-1]
-    last1h = df_1h.iloc[-1]
-    last4h = df_4h.iloc[-1]
-    adx5_val = float(last5.get("adx", 0))
-    adx15_val = float(last15.get("adx", 0))
-    adx1h_val = float(last1h.get("adx", 0))
-    adx4h_val = float(last4h.get("adx", 0))
-    atr5 = float(last5.get("atr", 0))
-    atr15 = float(last15.get("atr", 0))
-    atr1h = float(last1h.get("atr", atr5))
-
-    adx_conf, tier5, tier15, tier1h, tier4h = _compute_adx_conf(
-        adx5_val,
-        adx15_val,
-        adx1h_val,
-        adx4h_val,
-    )
-
-    if 'supertrend_direction' not in last5.index:
-        return {
-            "action": "NO_TRADE",
-            "reason": "SuperTrend indicator not calculated",
-            "signal_type": "SUPERTREND"
-        }
-
-    st_5m = last5['supertrend_direction']
-    st_15m = last15['supertrend_direction']
-    st_1h = last1h['supertrend_direction']
-    st_4h = last4h['supertrend_direction']
-    strict_align = st_4h == st_1h == st_15m == st_5m
-    majority_count = sum([st_4h == st_5m, st_1h == st_5m, st_15m == st_5m, True])  # counts 5m self-align
-    majority_mode = (not strict_align) and majority_count >= 3 and (st_4h == st_5m or st_1h == st_5m)
-
-    status_msg = (
-        f"SuperTrend: 4H={'UP' if st_4h == 1 else 'DOWN'}, "
-        f"1H={'UP' if st_1h == 1 else 'DOWN'}, "
-        f"15m={'UP' if st_15m == 1 else 'DOWN'}, "
-        f"5m={'UP' if st_5m == 1 else 'DOWN'}"
-    )
-
-    price = last5["close"]
-    st_val = last5.get("supertrend", price)
-    price_on_side = (price > st_val) if st_5m == 1 else (price < st_val)
-    # Hard gates: ADX5m/15m, price on correct side, volatility, over-extension
-    if adx_conf == "blocked" or adx5_val < 20 or adx15_val < 20 or not price_on_side:
-        return {
-            "action": "NO_TRADE",
-            "reason": f"SuperTrend needs stronger confirmation (adx_conf={adx_conf}, price_on_side={price_on_side})",
-            "market_status": status_msg,
-            "signal_type": "SUPERTREND",
-        }
-
-    # Volatility filter
-    if atr5 < atr15 * 0.6:
-        return {
-            "action": "NO_TRADE",
-            "reason": "Volatility too low for fast scalping (ATR5m < 0.6 * ATR15m)",
-            "market_status": status_msg,
-            "signal_type": "SUPERTREND",
-        }
-
-    # Over-extension protection
-    over_ext = abs(price - last5["ema50"]) / last5["ema50"]
-    ext_limit = 0.01 if adx5_val >= 25 else 0.015
-    if over_ext >= ext_limit:
-        return {
-            "action": "NO_TRADE",
-            "reason": f"Over-extended from EMA50 (over_ext={over_ext:.4f})",
-            "market_status": status_msg,
-            "signal_type": "SUPERTREND",
-        }
-
-    # Micro structure (swing) and PA confirmations
-    recent_high = df_5m["high"].tail(5).iloc[:-1].max() if len(df_5m) >= 4 else last5["high"]
-    recent_low = df_5m["low"].tail(5).iloc[:-1].min() if len(df_5m) >= 4 else last5["low"]
-    hist_now = last5["macd"] - last5["macd_signal"]
-    hist_prev = df_5m.iloc[-2]["macd"] - df_5m.iloc[-2]["macd_signal"] if len(df_5m) >= 2 else hist_now
-    rsi_prev = df_5m.iloc[-2].get("rsi", last5.get("rsi"))
-    rsi_rising = last5.get("rsi") is not None and rsi_prev is not None and last5["rsi"] > rsi_prev
-    rsi_falling = last5.get("rsi") is not None and rsi_prev is not None and last5["rsi"] < rsi_prev
-
-    score = 0
-    # Alignment score
-    if strict_align or majority_mode:
-        score += 1
-    # ADX score
-    if adx_conf in ("MEDIUM", "HIGH"):
-        score += 1
-    # MACD & RSI agreement score
-    # (direction-specific below)
-    # Micro-structure score will be added on trigger
-
-    # Directional checks
-    def make_response(action, conf, sl, tp):
-        return {
-            "action": action,
-            "confidence": conf,
-            "confidence_emoji": _confidence_emoji(conf),
-            "signal_type": "SUPERTREND",
-            "entry": float(last5["close"]),
-            "sl": sl,
-            "tp": tp,
-            "timeframe": "5m",
-            "market_status": status_msg
-        }
-
-    # BUY
-    if st_5m == 1 and (strict_align or majority_mode):
-        pa_ok = (
-            price > recent_high
-            and (last5["stoch_k"] > last5["stoch_d"] or rsi_rising)
-            and (hist_now > 0 or hist_now > hist_prev)
-        )
-        if pa_ok:
-            score_dir = score + 1  # MACD/RSI agree
-            score_dir += 1  # micro-structure break
-            # Confidence from score
-            if score_dir >= 4:
-                score_conf = "HIGH"
-            elif score_dir == 3:
-                score_conf = "MEDIUM"
-            elif score_dir == 2:
-                score_conf = "LOW"
-            else:
-                score_conf = "LOW"
-            # Majority downgrade
-            if majority_mode and score_conf == "HIGH":
-                score_conf = "MEDIUM"
-            elif majority_mode and score_conf == "MEDIUM":
-                score_conf = "LOW"
-            # ADX boost/downgrade
-            if adx5_val >= 25:
-                score_conf = "HIGH"
-            if adx1h_val < 20 or adx4h_val < 20:
-                score_conf = "LOW"
-            # SL/TP tuned for scalping
-            sl_dist = min(atr1h * 1.0, 20.0)
-            tp_mult = 1.0 if adx5_val >= 25 or adx15_val >= 25 else 0.8
-            tp_cap = 12.0 if adx5_val >= 25 or adx15_val >= 25 else 8.0
-            tp_dist = min(atr5 * tp_mult, tp_cap)
-            sl = price - sl_dist
-            tp = price + tp_dist
-            if score_dir >= 2:
-                return make_response("BUY", score_conf, sl, tp)
-
-    # SELL
-    if st_5m == -1 and (strict_align or majority_mode):
-        pa_ok = (
-            price < recent_low
-            and (last5["stoch_k"] < last5["stoch_d"] or rsi_falling)
-            and (hist_now < 0 or hist_now < hist_prev)
-        )
-        if pa_ok:
-            score_dir = score + 1  # MACD/RSI agree
-            score_dir += 1  # micro-structure break
-            if score_dir >= 4:
-                score_conf = "HIGH"
-            elif score_dir == 3:
-                score_conf = "MEDIUM"
-            elif score_dir == 2:
-                score_conf = "LOW"
-            else:
-                score_conf = "LOW"
-            if majority_mode and score_conf == "HIGH":
-                score_conf = "MEDIUM"
-            elif majority_mode and score_conf == "MEDIUM":
-                score_conf = "LOW"
-            if adx5_val >= 25:
-                score_conf = "HIGH"
-            if adx1h_val < 20 or adx4h_val < 20:
-                score_conf = "LOW"
-            sl_dist = min(atr1h * 1.0, 20.0)
-            tp_mult = 1.0 if adx5_val >= 25 or adx15_val >= 25 else 0.8
-            tp_cap = 12.0 if adx5_val >= 25 or adx15_val >= 25 else 8.0
-            tp_dist = min(atr5 * tp_mult, tp_cap)
-            sl = price + sl_dist
-            tp = price - tp_dist
-            if score_dir >= 2:
-                return make_response("SELL", score_conf, sl, tp)
-
-    return {
-        "action": "NO_TRADE",
-        "reason": "SuperTrend signals not aligned across timeframes",
-        "market_status": status_msg,
-        "signal_type": "SUPERTREND"
-    }
-
-
 def check_golden_entry(df_5m, df_15m, df_1h, df_4h):
     """
     Very strict confluence filter for high-confidence scalps.
@@ -766,3 +565,259 @@ def check_ultra_entry(df_5m, df_15m, df_1h, df_4h):
             "confluence_score": score,
         },
     }
+
+
+# ---------------------------------------------------------------------------
+# ULTRA V3 (independent advanced scalping engine)
+# ---------------------------------------------------------------------------
+
+
+def check_ultra_v3(df_5m, df_15m, df_1h, df_4h):
+    """
+    Advanced SMC-based scalping engine (independent from other strategies).
+    """
+    if min(len(df_5m), len(df_15m), len(df_1h), len(df_4h)) < 10:
+        return {
+            "action": "NO_TRADE",
+            "reason": "Not enough candles for ULTRA_V3",
+            "signal_type": "ULTRA_V3",
+            "market_status": "Insufficient data",
+        }
+
+    last5 = df_5m.iloc[-1]
+    last15 = df_15m.iloc[-1]
+    last1h = df_1h.iloc[-1]
+    last4h = df_4h.iloc[-1]
+    price = float(last5["close"])
+
+    # Helper: swing detection (simple 3-candle pattern)
+    def swings(df):
+        highs = (df["high"].shift(1) > df["high"].shift(2)) & (df["high"].shift(1) > df["high"])
+        lows = (df["low"].shift(1) < df["low"].shift(2)) & (df["low"].shift(1) < df["low"])
+        sh = [{"type": "high", "idx": df.index[i - 1], "price": float(df["high"].iloc[i - 1])} for i in range(2, len(df)) if highs.iloc[i]]
+        sl = [{"type": "low", "idx": df.index[i - 1], "price": float(df["low"].iloc[i - 1])} for i in range(2, len(df)) if lows.iloc[i]]
+        return sh, sl
+
+    def liquidity_map(df):
+        sh, sl = swings(df)
+        eq_tolerance = 0.0005
+        def equal_clusters(points):
+            pts = sorted(points, key=lambda x: x["price"])
+            clusters = []
+            for p in pts:
+                if not clusters or abs(clusters[-1][-1]["price"] - p["price"]) > eq_tolerance * max(1.0, p["price"]):
+                    clusters.append([p])
+                else:
+                    clusters[-1].append(p)
+            return [c for c in clusters if len(c) >= 2]
+        return {
+            "swing_highs": sh,
+            "swing_lows": sl,
+            "equal_highs": equal_clusters(sh),
+            "equal_lows": equal_clusters(sl),
+            "liq_above": [p["price"] for p in sh],
+            "liq_below": [p["price"] for p in sl],
+        }
+
+    liq_5 = liquidity_map(df_5m.tail(300))
+    liq_15 = liquidity_map(df_15m.tail(300))
+    liq_1h = liquidity_map(df_1h.tail(300))
+    liq_4h = liquidity_map(df_4h.tail(400))
+
+    # HTF trend alignment
+    trend_1h = _trend(last1h)
+    trend_4h = _trend(last4h)
+    trend_15 = _trend(last15)
+    if not ((trend_1h == trend_4h == "bullish" and trend_15 != "bearish") or (trend_1h == trend_4h == "bearish" and trend_15 != "bullish")):
+        return {
+            "action": "NO_TRADE",
+            "reason": "HTF trends not aligned for ULTRA_V3",
+            "signal_type": "ULTRA_V3",
+            "market_status": f"4H={trend_4h},1H={trend_1h},15m={trend_15}",
+        }
+
+    direction = "BUY" if trend_1h == "bullish" else "SELL"
+
+    # Sweep detection (last 3-7 candles)
+    tail = df_5m.tail(7)
+    sweep = {"valid": False, "level": None, "strength": None, "direction": None}
+    if len(tail) >= 3:
+        ref_high = tail.iloc[:-1]["high"].max()
+        ref_low = tail.iloc[:-1]["low"].min()
+        last_candle = tail.iloc[-1]
+        if direction == "BUY" and last_candle["low"] < ref_low and last_candle["close"] > ref_low:
+            sweep = {"valid": True, "level": float(ref_low), "strength": float(ref_low - last_candle["low"]), "direction": "BUY"}
+        if direction == "SELL" and last_candle["high"] > ref_high and last_candle["close"] < ref_high:
+            sweep = {"valid": True, "level": float(ref_high), "strength": float(last_candle["high"] - ref_high), "direction": "SELL"}
+    if not sweep["valid"]:
+        return {
+            "action": "NO_TRADE",
+            "reason": "No liquidity sweep",
+            "signal_type": "ULTRA_V3",
+            "market_status": "Sweep missing",
+        }
+
+    # Micro CHOCH + BOS
+    micro_bos = {"valid": False, "direction": None, "level": None}
+    window = df_5m.tail(6).iloc[:-1]
+    if direction == "BUY":
+        minor_high = window["high"].max() if len(window) else tail["high"].max()
+        if price > minor_high:
+            micro_bos = {"valid": True, "direction": "BUY", "level": float(minor_high)}
+    else:
+        minor_low = window["low"].min() if len(window) else tail["low"].min()
+        if price < minor_low:
+            micro_bos = {"valid": True, "direction": "SELL", "level": float(minor_low)}
+    if not micro_bos["valid"]:
+        return {
+            "action": "NO_TRADE",
+            "reason": "CHOCH/BOS missing",
+            "signal_type": "ULTRA_V3",
+            "market_status": "Micro BOS missing",
+        }
+
+    # Refined order block (last opposite candle before sweep)
+    ob = {"valid": False, "direction": None, "low": None, "high": None}
+    pre_sweep = df_5m.iloc[:-1]
+    if direction == "BUY":
+        opp = pre_sweep[pre_sweep["close"] < pre_sweep["open"]]
+        if not opp.empty:
+            last_opp = opp.iloc[-1]
+            if price > last_opp["high"]:
+                span = last_opp["high"] - last_opp["low"]
+                ob_low = last_opp["low"] + span * (1 / 3)
+                ob_high = last_opp["high"] - span * (1 / 3)
+                ob = {"valid": True, "direction": "BUY", "low": float(ob_low), "high": float(ob_high)}
+    else:
+        opp = pre_sweep[pre_sweep["close"] > pre_sweep["open"]]
+        if not opp.empty:
+            last_opp = opp.iloc[-1]
+            if price < last_opp["low"]:
+                span = last_opp["high"] - last_opp["low"]
+                ob_low = last_opp["low"] + span * (1 / 3)
+                ob_high = last_opp["high"] - span * (1 / 3)
+                ob = {"valid": True, "direction": "SELL", "low": float(ob_low), "high": float(ob_high)}
+    if not ob["valid"]:
+        return {
+            "action": "NO_TRADE",
+            "reason": "Refined OB invalid",
+            "signal_type": "ULTRA_V3",
+            "market_status": "OB invalid",
+        }
+
+    # FVG alignment (optional)
+    fvg = {"overlap_ob": False}
+    if len(df_5m) >= 3:
+        highs = df_5m["high"]
+        lows = df_5m["low"]
+        for i in range(len(df_5m) - 2, len(df_5m)):
+            if i < 2:
+                continue
+            if direction == "BUY" and lows.iloc[i] > highs.iloc[i - 2]:
+                if ob["low"] <= lows.iloc[i] <= ob["high"]:
+                    fvg["overlap_ob"] = True
+            if direction == "SELL" and highs.iloc[i] < lows.iloc[i - 2]:
+                if ob["low"] <= highs.iloc[i] <= ob["high"]:
+                    fvg["overlap_ob"] = True
+
+    # ADX confidence (not blocker)
+    adx_info = {
+        "adx5": float(last5.get("adx", 0)),
+        "adx15": float(last15.get("adx", 0)),
+        "adx1h": float(last1h.get("adx", 0)),
+    }
+    adx_score = 0
+    if adx_info["adx5"] >= 20:
+        adx_score += 1
+    if adx_info["adx15"] >= 22:
+        adx_score += 1
+    if adx_info["adx1h"] >= 25:
+        adx_score += 1
+
+    # Confluence score 0-6
+    score = 0
+    if sweep["valid"]:
+        score += 1
+    if micro_bos["valid"]:
+        score += 1
+    if ob["valid"]:
+        score += 1
+    if fvg["overlap_ob"]:
+        score += 1
+    score += adx_score
+
+    if score < 2:
+        return {"action": "NO_TRADE", "reason": "Low score", "signal_type": "ULTRA_V3", "market_status": f"score={score}"}
+
+    if score >= 6:
+        confidence = "HIGH"
+    elif score >= 4:
+        confidence = "MEDIUM"
+    else:
+        confidence = "LOW"
+    conf_emoji = "⭐⭐⭐" if confidence == "HIGH" else ("⭐⭐" if confidence == "MEDIUM" else "⭐")
+
+    # Entry triggers: allow if price within OB or retesting micro levels
+    entry_ok = False
+    if direction == "BUY":
+        if ob["low"] <= price <= ob["high"]:
+            entry_ok = True
+        if price >= micro_bos["level"]:
+            entry_ok = True
+    else:
+        if ob["low"] <= price <= ob["high"]:
+            entry_ok = True
+        if price <= micro_bos["level"]:
+            entry_ok = True
+    if not entry_ok:
+        return {"action": "NO_TRADE", "reason": "No entry trigger", "signal_type": "ULTRA_V3", "market_status": f"score={score}"}
+
+    # SL based on protected liquidity
+    buffer = 0.05
+    if direction == "BUY":
+        sl_raw = min(sweep["level"], ob["low"]) - buffer
+    else:
+        sl_raw = max(sweep["level"], ob["high"]) + buffer
+    fallback_sl = min(float(last1h.get("atr", 0)) * 1.2 if last1h.get("atr", 0) else 0, 25.0)
+    sl = sl_raw if sl_raw is not None else (price - fallback_sl if direction == "BUY" else price + fallback_sl)
+
+    # TP levels via nearest liquidity
+    if direction == "BUY":
+        tp1 = max(liq_5["liq_above"]) if liq_5["liq_above"] else price
+        tp2 = max(liq_15["liq_above"]) if liq_15["liq_above"] else tp1
+        tp3 = max(liq_1h["liq_above"]) if liq_1h["liq_above"] else tp2
+        tp4 = max(liq_4h["liq_above"]) if liq_4h["liq_above"] else tp3
+    else:
+        tp1 = min(liq_5["liq_below"]) if liq_5["liq_below"] else price
+        tp2 = min(liq_15["liq_below"]) if liq_15["liq_below"] else tp1
+        tp3 = min(liq_1h["liq_below"]) if liq_1h["liq_below"] else tp2
+        tp4 = min(liq_4h["liq_below"]) if liq_4h["liq_below"] else tp3
+
+    result = {
+        "action": direction,
+        "signal_type": "ULTRA_V3",
+        "entry": round(price, 2),
+        "sl": round(sl, 2),
+        "tp1": round(tp1, 2),
+        "tp2": round(tp2, 2),
+        "tp3": round(tp3, 2),
+        "tp4": round(tp4, 2),
+        "confidence": confidence,
+        "confidence_emoji": conf_emoji,
+        "market_status": f"HTF {direction} | sweep {sweep['valid']} | BOS {micro_bos['valid']} | score {score}",
+        "analysis": {
+            "sweep": sweep,
+            "micro_bos": micro_bos,
+            "order_block": ob,
+            "fvg": fvg,
+            "adx": adx_info,
+            "liquidity": {
+                "m5": liq_5,
+                "m15": liq_15,
+                "h1": liq_1h,
+                "h4": liq_4h,
+            },
+            "score": score,
+        },
+    }
+    return result
