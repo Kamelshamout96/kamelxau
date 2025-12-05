@@ -12,6 +12,7 @@ from live_data_collector import (
     build_timeframe_candles,
 )
 from indicators import add_all_indicators
+from advanced_analysis import analyze_mtf
 from signal_engine import check_entry, check_supertrend_entry
 from signal_engine import check_golden_entry  # noqa: F401 (future use)
 
@@ -27,6 +28,48 @@ _collector_thread = None
 DATA_DIR = Path("data")
 DATA_DIR.mkdir(exist_ok=True)
 SENT_LOG = DATA_DIR / "sent_signals.csv"
+
+
+def _normalize_trade_value(value) -> str:
+    """
+    Normalize trade numeric values so deduplication ignores decimal separators.
+    Falls back to stripping dots/commas if parsing fails.
+    """
+    try:
+        return str(int(float(str(value).replace(",", ".").strip())))
+    except Exception:
+        value_str = str(value)
+        return value_str.replace(".", "").replace(",", "")
+
+
+def _normalize_signal_key(raw_key: str) -> str:
+    """Normalize an existing log key to the same decimal-insensitive form."""
+    parts = raw_key.split("-")
+    if len(parts) >= 5:
+        action, timeframe, entry, sl, tp = parts[:5]
+        return "-".join(
+            [
+                action,
+                timeframe,
+                _normalize_trade_value(entry),
+                _normalize_trade_value(sl),
+                _normalize_trade_value(tp),
+            ]
+        )
+    return raw_key
+
+
+def _build_signal_key(signal: dict) -> str:
+    """Build a key that ignores decimal separators for deduplication."""
+    return "-".join(
+        [
+            signal.get("action", ""),
+            signal.get("timeframe", ""),
+            _normalize_trade_value(signal.get("entry")),
+            _normalize_trade_value(signal.get("sl")),
+            _normalize_trade_value(signal.get("tp")),
+        ]
+    )
 
 
 def _collector_loop():
@@ -123,6 +166,9 @@ def run_signal():
         latest_price = df_5m["close"].iloc[-1]
 
         # Generate signals
+        analysis_summary = analyze_mtf(
+            {"4H": df_4h, "1H": df_1h, "15m": df_15m, "5m": df_5m}
+        )
         signal = check_entry(df_5m, df_15m, df_1h, df_4h)
         if signal.get("action") == "NO_TRADE":
             supertrend_signal = check_supertrend_entry(df_5m, df_15m, df_1h, df_4h)
@@ -155,10 +201,10 @@ def run_signal():
             confidence_text = confidence if confidence != "UNKNOWN" else signal_type
 
             # Deduplicate signals and purge entries older than 1 hour
-            key = f"{signal['action']}-{signal.get('timeframe','')}-{round(signal['entry'],2)}-{round(signal['sl'],2)}-{round(signal['tp'],2)}"
+            key = _build_signal_key(signal)
             already_sent = False
             now_ts = time.time()
-            kept = []
+            kept = {}
             try:
                 if SENT_LOG.exists():
                     with SENT_LOG.open("r", encoding="utf-8") as f:
@@ -173,18 +219,19 @@ def run_signal():
                                 continue
                             if now_ts - ts_val > 3600:
                                 continue
-                            if k == key:
+                            normalized_k = _normalize_signal_key(k)
+                            if normalized_k == key:
                                 already_sent = True
-                            kept.append((k, ts_val))
+                            kept[normalized_k] = max(ts_val, kept.get(normalized_k, 0))
             except Exception as e:
                 print(f"[warn] failed to read signal log: {e}")
-                kept = []
+                kept = {}
 
             if not already_sent:
-                kept.append((key, now_ts))
+                kept[key] = now_ts
                 try:
                     with SENT_LOG.open("w", encoding="utf-8") as f:
-                        for k, ts_val in kept:
+                        for k, ts_val in kept.items():
                             f.write(f"{k},{ts_val}\\n")
                 except Exception as e:
                     print(f"[warn] failed to log signal: {e}")
@@ -206,6 +253,7 @@ def run_signal():
             else:
                 print("[info] signal already sent, skipping telegram")
 
+        signal["analysis"] = analysis_summary
         return signal
 
     except DataError as e:
