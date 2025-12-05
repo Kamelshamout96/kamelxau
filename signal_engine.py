@@ -598,3 +598,171 @@ def check_golden_entry(df_5m, df_15m, df_1h, df_4h):
         "market_status": status_msg,
         "signal_type": "GOLDEN",
     }
+
+
+# ---------------------------------------------------------------------------
+# ULTRA SIGNALS (isolated SMC-based system)
+# ---------------------------------------------------------------------------
+
+
+def check_ultra_entry(df_5m, df_15m, df_1h, df_4h):
+    """
+    Ultra SMC scalping engine (isolated). Does not modify other strategies.
+    """
+    # Basic safety
+    if min(len(df_5m), len(df_15m), len(df_1h), len(df_4h)) < 8:
+        return {
+            "action": "NO_TRADE",
+            "reason": "Not enough candles for ULTRA",
+            "signal_type": "ULTRA",
+            "market_status": "Insufficient data",
+        }
+
+    last5 = df_5m.iloc[-1]
+    last15 = df_15m.iloc[-1]
+    last1h = df_1h.iloc[-1]
+    last4h = df_4h.iloc[-1]
+    price = last5["close"]
+    adx5 = float(last5.get("adx", 0))
+    adx15 = float(last15.get("adx", 0))
+
+    # Trends (HTF alignment)
+    trend_1h = _trend(last1h)
+    trend_4h = _trend(last4h)
+    htf_bull = trend_1h == "bullish" and trend_4h == "bullish"
+    htf_bear = trend_1h == "bearish" and trend_4h == "bearish"
+
+    # Liquidity sweep detection (last 3-7 candles)
+    tail = df_5m.tail(7)
+    prev_range = tail.iloc[:-1] if len(tail) > 1 else tail
+    recent_high = prev_range["high"].max()
+    recent_low = prev_range["low"].min()
+
+    sweep = {"valid": False, "direction": None, "level": None, "strength": None}
+    wick_ratio = None
+    if len(tail) >= 3:
+        candle = tail.iloc[-1]
+        body_mid = (candle["open"] + candle["close"]) / 2
+        # BUY sweep: take out lows then close back above
+        if candle["low"] < recent_low and candle["close"] > recent_low and htf_bull:
+            sweep["valid"] = True
+            sweep["direction"] = "BUY"
+            sweep["level"] = float(recent_low)
+            sweep["strength"] = float(recent_low - candle["low"])
+            wick_ratio = (candle["low"] - min(candle["open"], candle["close"])) if body_mid else 0
+        # SELL sweep: take out highs then close back below
+        if candle["high"] > recent_high and candle["close"] < recent_high and htf_bear:
+            sweep["valid"] = True
+            sweep["direction"] = "SELL"
+            sweep["level"] = float(recent_high)
+            sweep["strength"] = float(candle["high"] - recent_high)
+            wick_ratio = (max(candle["open"], candle["close"]) - candle["high"]) if body_mid else 0
+
+    # Micro BOS (last 3-6 candles)
+    micro_bos = {"valid": False, "direction": None, "level": None}
+    if sweep["valid"]:
+        window = df_5m.tail(6).iloc[:-1] if len(df_5m) >= 6 else df_5m.iloc[:-1]
+        if sweep["direction"] == "BUY":
+            minor_high = window["high"].max() if len(window) else recent_high
+            if price > minor_high:
+                micro_bos = {"valid": True, "direction": "BUY", "level": float(minor_high)}
+        if sweep["direction"] == "SELL":
+            minor_low = window["low"].min() if len(window) else recent_low
+            if price < minor_low:
+                micro_bos = {"valid": True, "direction": "SELL", "level": float(minor_low)}
+
+    # Breaker block (last opposite candle before sweep)
+    breaker = {"valid": False, "direction": None}
+    if sweep["valid"]:
+        sweep_idx = df_5m.index[-1]
+        before_sweep = df_5m.iloc[:-1]
+        if sweep["direction"] == "BUY":
+            opp = before_sweep[before_sweep["close"] < before_sweep["open"]]
+            if not opp.empty:
+                last_bear = opp.iloc[-1]
+                if price > last_bear["high"]:
+                    breaker = {"valid": True, "direction": "BUY"}
+        if sweep["direction"] == "SELL":
+            opp = before_sweep[before_sweep["close"] > before_sweep["open"]]
+            if not opp.empty:
+                last_bull = opp.iloc[-1]
+                if price < last_bull["low"]:
+                    breaker = {"valid": True, "direction": "SELL"}
+
+    # Confluence scoring
+    score = 0
+    if sweep["valid"]:
+        score += 1
+    if micro_bos["valid"]:
+        score += 1
+    if breaker["valid"]:
+        score += 1
+    if adx5 >= 20:
+        score += 1
+
+    if score < 2:
+        return {
+            "action": "NO_TRADE",
+            "reason": "Insufficient ULTRA confluence",
+            "signal_type": "ULTRA",
+            "market_status": f"score={score}",
+            "analysis": {
+                "sweep": sweep,
+                "micro_bos": micro_bos,
+                "breaker": breaker,
+                "confluence_score": score,
+            },
+        }
+
+    confidence = "LOW"
+    if score == 3:
+        confidence = "MEDIUM"
+    if score == 4:
+        confidence = "HIGH"
+    confidence_emoji = "⭐⭐⭐" if confidence == "HIGH" else ("⭐⭐" if confidence == "MEDIUM" else "⭐")
+
+    # ADX and direction gating
+    if sweep["direction"] == "BUY" and not htf_bull:
+        return {"action": "NO_TRADE", "reason": "HTF trend not bullish", "signal_type": "ULTRA"}
+    if sweep["direction"] == "SELL" and not htf_bear:
+        return {"action": "NO_TRADE", "reason": "HTF trend not bearish", "signal_type": "ULTRA"}
+    if adx5 < 20:
+        return {"action": "NO_TRADE", "reason": "ADX5m < 20", "signal_type": "ULTRA"}
+
+    # SL/TP
+    fallback_sl = min(float(last1h.get("atr", 0)) * 1.2 if last1h.get("atr", 0) else 0, 25.0)
+    sweep_level = sweep.get("level", price)
+    if sweep["direction"] == "BUY":
+        sl = sweep_level if sweep_level else price - fallback_sl
+        sl = sl if sweep_level else price - fallback_sl
+        tp1 = df_5m["high"].tail(20).max()
+        tp2 = df_15m["high"].tail(20).max()
+        tp3 = max(df_1h["high"].tail(30).max(), df_4h["high"].tail(30).max())
+    else:
+        sl = sweep_level if sweep_level else price + fallback_sl
+        tp1 = df_5m["low"].tail(20).min()
+        tp2 = df_15m["low"].tail(20).min()
+        tp3 = min(df_1h["low"].tail(30).min(), df_4h["low"].tail(30).min())
+
+    # Fallback SL if sweep not set
+    if sweep_level is None:
+        sl = price - fallback_sl if sweep["direction"] == "BUY" else price + fallback_sl
+
+    return {
+        "action": sweep["direction"] if sweep["valid"] and micro_bos["valid"] and breaker["valid"] else "NO_TRADE",
+        "entry": float(price),
+        "sl": float(sl),
+        "tp1": float(tp1),
+        "tp2": float(tp2),
+        "tp3": float(tp3),
+        "confidence": confidence,
+        "confidence_emoji": confidence_emoji,
+        "signal_type": "ULTRA",
+        "market_status": f"score={score}, adx5={adx5:.1f}, adx15={adx15:.1f}",
+        "analysis": {
+            "sweep": sweep,
+            "micro_bos": micro_bos,
+            "breaker": breaker,
+            "confluence_score": score,
+        },
+    }

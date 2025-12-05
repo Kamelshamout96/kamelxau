@@ -13,7 +13,7 @@ from live_data_collector import (
 )
 from indicators import add_all_indicators
 from advanced_analysis import analyze_mtf
-from signal_engine import check_entry, check_supertrend_entry
+from signal_engine import check_entry, check_supertrend_entry, check_ultra_entry
 from signal_engine import check_golden_entry  # noqa: F401 (future use)
 
 
@@ -186,6 +186,12 @@ def run_signal():
             supertrend_signal = check_supertrend_entry(df_5m, df_15m, df_1h, df_4h)
             if supertrend_signal.get("action") in ("BUY", "SELL"):
                 signal = supertrend_signal
+        # Ultra SMC signal (isolated). Use as fallback if primary is NO_TRADE.
+        ultra_signal = check_ultra_entry(df_5m, df_15m, df_1h, df_4h)
+        if signal.get("action") == "NO_TRADE" and ultra_signal.get("action") in ("BUY", "SELL"):
+            # ensure timeframe for downstream formatting
+            ultra_signal.setdefault("timeframe", "5m")
+            signal = ultra_signal
 
         # Telegram alerts for potential setups / trend updates
         def _send_alert(title: str, body: str) -> None:
@@ -244,6 +250,7 @@ def run_signal():
                 print("[info] signal already sent, skipping telegram")
 
         signal["analysis"] = analysis_summary
+        signal["ultra"] = ultra_signal
         return signal
 
     except DataError as e:
