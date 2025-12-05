@@ -1,6 +1,6 @@
+import json
 import os
 import threading
-import time
 from pathlib import Path
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
@@ -27,49 +27,61 @@ _collector_stop = threading.Event()
 _collector_thread = None
 DATA_DIR = Path("data")
 DATA_DIR.mkdir(exist_ok=True)
-SENT_LOG = DATA_DIR / "sent_signals.csv"
+LAST_SIGNAL_FILE = DATA_DIR / "last_signal.json"
 
 
-def _normalize_trade_value(value) -> str:
-    """
-    Normalize trade numeric values so deduplication ignores decimal separators.
-    Falls back to stripping dots/commas if parsing fails.
-    """
+def normalize_signal(signal: dict) -> dict:
+    """Round numeric prices to 2 decimals and standardize keys."""
+    normalized = dict(signal)
+    for key in ("entry", "sl", "tp"):
+        if key in normalized and normalized[key] is not None:
+            try:
+                normalized[key] = round(float(normalized[key]), 2)
+            except Exception:
+                normalized[key] = normalized[key]
+    return normalized
+
+
+def is_duplicate_signal(current: dict, last: dict, tolerance: float = 0.05) -> bool:
+    """Check duplicates using direction, timeframe, trend summary, and price tolerance."""
+    if not last:
+        return False
+    if current.get("action") != last.get("action"):
+        return False
+    if current.get("timeframe") != last.get("timeframe"):
+        return False
+    if current.get("market_status") != last.get("market_status"):
+        return False
     try:
-        return str(int(float(str(value).replace(",", ".").strip())))
+        c_entry, l_entry = float(current.get("entry", 0)), float(last.get("entry", 0))
+        c_sl, l_sl = float(current.get("sl", 0)), float(last.get("sl", 0))
+        c_tp, l_tp = float(current.get("tp", 0)), float(last.get("tp", 0))
     except Exception:
-        value_str = str(value)
-        return value_str.replace(".", "").replace(",", "")
-
-
-def _normalize_signal_key(raw_key: str) -> str:
-    """Normalize an existing log key to the same decimal-insensitive form."""
-    parts = raw_key.split("-")
-    if len(parts) >= 5:
-        action, timeframe, entry, sl, tp = parts[:5]
-        return "-".join(
-            [
-                action,
-                timeframe,
-                _normalize_trade_value(entry),
-                _normalize_trade_value(sl),
-                _normalize_trade_value(tp),
-            ]
-        )
-    return raw_key
-
-
-def _build_signal_key(signal: dict) -> str:
-    """Build a key that ignores decimal separators for deduplication."""
-    return "-".join(
-        [
-            signal.get("action", ""),
-            signal.get("timeframe", ""),
-            _normalize_trade_value(signal.get("entry")),
-            _normalize_trade_value(signal.get("sl")),
-            _normalize_trade_value(signal.get("tp")),
-        ]
+        return False
+    return (
+        abs(c_entry - l_entry) < tolerance
+        and abs(c_sl - l_sl) < tolerance
+        and abs(c_tp - l_tp) < tolerance
     )
+
+
+def _load_last_signal():
+    if not LAST_SIGNAL_FILE.exists():
+        return None
+    try:
+        with LAST_SIGNAL_FILE.open("r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"[warn] failed to read last signal: {e}")
+        return None
+
+
+def _save_last_signal(signal: dict):
+    try:
+        with LAST_SIGNAL_FILE.open("w", encoding="utf-8") as f:
+            json.dump(signal, f)
+    except Exception as e:
+        print(f"[warn] failed to persist last signal: {e}")
 
 
 def _collector_loop():
@@ -200,41 +212,18 @@ def run_signal():
             title = f"{signal['action']} XAUUSD Signal"
             confidence_text = confidence if confidence != "UNKNOWN" else signal_type
 
-            # Deduplicate signals and purge entries older than 1 hour
-            key = _build_signal_key(signal)
-            already_sent = False
-            now_ts = time.time()
-            kept = {}
-            try:
-                if SENT_LOG.exists():
-                    with SENT_LOG.open("r", encoding="utf-8") as f:
-                        for line in f:
-                            parts = line.strip().split(",")
-                            if len(parts) != 2:
-                                continue
-                            k, ts_str = parts
-                            try:
-                                ts_val = float(ts_str)
-                            except ValueError:
-                                continue
-                            if now_ts - ts_val > 3600:
-                                continue
-                            normalized_k = _normalize_signal_key(k)
-                            if normalized_k == key:
-                                already_sent = True
-                            kept[normalized_k] = max(ts_val, kept.get(normalized_k, 0))
-            except Exception as e:
-                print(f"[warn] failed to read signal log: {e}")
-                kept = {}
-
-            if not already_sent:
-                kept[key] = now_ts
-                try:
-                    with SENT_LOG.open("w", encoding="utf-8") as f:
-                        for k, ts_val in kept.items():
-                            f.write(f"{k},{ts_val}\\n")
-                except Exception as e:
-                    print(f"[warn] failed to log signal: {e}")
+            normalized = normalize_signal(
+                {
+                    "action": signal.get("action"),
+                    "timeframe": signal.get("timeframe"),
+                    "entry": signal.get("entry"),
+                    "sl": signal.get("sl"),
+                    "tp": signal.get("tp"),
+                    "market_status": signal.get("market_status"),
+                }
+            )
+            last_signal = _load_last_signal()
+            already_sent = is_duplicate_signal(normalized, last_signal)
 
             msg = (
                 f"🚀 <b>{title}</b>\n"
@@ -250,6 +239,7 @@ def run_signal():
 
             if not already_sent:
                 send_telegram(TG_TOKEN, TG_CHAT, msg)
+                _save_last_signal(normalized)
             else:
                 print("[info] signal already sent, skipping telegram")
 
