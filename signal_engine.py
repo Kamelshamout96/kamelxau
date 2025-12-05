@@ -316,7 +316,12 @@ def check_supertrend_entry(df_5m, df_15m, df_1h, df_4h):
     st_1h = last1h['supertrend_direction']
     st_4h = last4h['supertrend_direction']
 
-    status_msg = f"SuperTrend: 4H={'dYY›' if st_4h == 1 else 'dY\"''}, 1H={'dYY›' if st_1h == 1 else 'dY\"''}, 15m={'dYY›' if st_15m == 1 else 'dY\"''}, 5m={'dYY›' if st_5m == 1 else 'dY\"''}"
+    status_msg = (
+        f"SuperTrend: 4H={'UP' if st_4h == 1 else 'DOWN'}, "
+        f"1H={'UP' if st_1h == 1 else 'DOWN'}, "
+        f"15m={'UP' if st_15m == 1 else 'DOWN'}, "
+        f"5m={'UP' if st_5m == 1 else 'DOWN'}"
+    )
 
     price = last5["close"]
     st_val = last5.get("supertrend", price)
