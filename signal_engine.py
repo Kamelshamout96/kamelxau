@@ -1,4 +1,11 @@
 def _trend(row):
+    """
+    Trend with optional structure support.
+    If a structure label is present, use it; otherwise fall back to EMA50/200.
+    """
+    struct = row.get("market_structure") if hasattr(row, "get") else None
+    if struct in ("bullish", "bearish"):
+        return struct
     if row["close"] > row["ema200"] and row["ema50"] > row["ema200"]:
         return "bullish"
     if row["close"] < row["ema200"] and row["ema50"] < row["ema200"]:
@@ -10,57 +17,124 @@ def calculate_sl_tp(
     entry,
     atr,
     direction,
-    sl_atr_mult=0.6,
+    sl_atr_mult=1.2,
     tp_atr_mult=1.0,
-    max_dist=7.0,
+    max_dist=12.0,
     sl_atr=None,
-    sl_max_dist=None,
+    sl_max_dist=25.0,
     tp_atr=None,
-    tp_max_dist=None,
+    tp_max_dist=12.0,
 ):
     """
-    Calculate SL and TP with optional separate ATR sources/caps for stop and target.
-    max_dist keeps backward compatibility when explicit caps are not provided.
+    SL = structure ref +/- ATR*1.2 (prefers 1H ATR), capped at $25.
+    TP = entry +/- ATR*1.0 (prefers 5m ATR), capped at $12.
     """
     sl_src_atr = sl_atr if sl_atr is not None else atr
     tp_src_atr = tp_atr if tp_atr is not None else atr
-    sl_cap = sl_max_dist if sl_max_dist is not None else max_dist
-    tp_cap = tp_max_dist if tp_max_dist is not None else max_dist
+    sl_cap = sl_max_dist if sl_max_dist is not None else 25.0
+    tp_cap = tp_max_dist if tp_max_dist is not None else 12.0
 
     sl_dist = min(sl_src_atr * sl_atr_mult, sl_cap)
     tp_dist = min(tp_src_atr * tp_atr_mult, tp_cap)
-    
+
     if direction == "BUY":
         sl = entry - sl_dist
         tp = entry + tp_dist
     else:  # SELL
         sl = entry + sl_dist
         tp = entry - tp_dist
-        
+
     return float(sl), float(tp)
 
 
-def _momentum_check(curr, prev):
-    """Heuristic momentum check for MACD histogram slope."""
-    hist_now = curr["macd"] - curr["macd_signal"]
-    hist_prev = prev["macd"] - prev["macd_signal"]
-    return hist_now > hist_prev and hist_now > 0
+def detect_rsi_cross(prev_rsi, curr_rsi):
+    """Detect RSI crosses through the 45-55 zone."""
+    try:
+        p = float(prev_rsi)
+        c = float(curr_rsi)
+    except Exception:
+        return None
+    bullish = (p < 45 <= c) or (p < 55 <= c)
+    bearish = (p > 55 >= c) or (p > 45 >= c)
+    if bullish and not bearish:
+        return "bullish"
+    if bearish and not bullish:
+        return "bearish"
+    return None
 
 
-def _momentum_down(curr, prev):
-    """Inverse momentum check for bearish continuation."""
-    hist_now = curr["macd"] - curr["macd_signal"]
-    hist_prev = prev["macd"] - prev["macd_signal"]
-    return hist_now < hist_prev and hist_now < 0
+def strong_macd_momentum(df, direction, lookback=3):
+    """
+    Strong MACD momentum requires MACD > signal and rising histogram for bullish,
+    MACD < signal and falling histogram for bearish over the last 2-3 candles.
+    """
+    if len(df) < lookback:
+        return False
+    tail = df.tail(lookback)
+    hist = tail["macd"] - tail["macd_signal"]
+    if direction == "bullish":
+        return (
+            tail["macd"].iloc[-1] > tail["macd_signal"].iloc[-1]
+            and hist.is_monotonic_increasing
+            and hist.iloc[-1] > 0
+        )
+    if direction == "bearish":
+        return (
+            tail["macd"].iloc[-1] < tail["macd_signal"].iloc[-1]
+            and hist.is_monotonic_decreasing
+            and hist.iloc[-1] < 0
+        )
+    return False
+
+
+def _adx_tier(val):
+    """Return ADX tier: blocked (<20), medium (20-25), high (>=25)."""
+    try:
+        v = float(val)
+    except Exception:
+        return "blocked"
+    if v < 20:
+        return "blocked"
+    if v < 25:
+        return "medium"
+    return "high"
+
+
+def _compute_adx_conf(adx5, adx15, adx1h=None, adx4h=None):
+    """
+    Apply MTF ADX rules and return (conf, tier5, tier15, tier1h, tier4h).
+    - If 5m or 15m < 20 => blocked.
+    - High requires 5m & 15m >= 25; medium for 20-25.
+    - 1H/4H only adjust confidence (never block): downgrade if <20, upgrade if both >=25.
+    """
+    tier5 = _adx_tier(adx5)
+    tier15 = _adx_tier(adx15)
+    tier1h = _adx_tier(adx1h) if adx1h is not None else None
+    tier4h = _adx_tier(adx4h) if adx4h is not None else None
+
+    if tier5 == "blocked" or tier15 == "blocked":
+        return "blocked", tier5, tier15, tier1h, tier4h
+
+    conf = "HIGH" if (tier5 == "high" and tier15 == "high") else "MEDIUM"
+
+    htf_weak = (tier1h == "blocked") or (tier4h == "blocked")
+    htf_strong = (tier1h == "high" and tier4h == "high")
+    if htf_weak:
+        conf = "LOW"
+    elif conf == "MEDIUM" and htf_strong:
+        conf = "HIGH"
+
+    return conf, tier5, tier15, tier1h, tier4h
+
+
+def _confidence_emoji(conf):
+    return "ƒ-?ƒ-?ƒ-?" if conf == "HIGH" else ("ƒ-?ƒ-?" if conf == "MEDIUM" else "ƒ-?")
 
 
 def check_entry(df_5m, df_15m, df_1h, df_4h):
     """
-    Scalping-focused multi-timeframe logic:
-    - Requires 4H/1H/15m trend alignment.
-    - Looks for sharp 5m momentum with tight risk (<= 100 pips).
+    Scalping-focused multi-timeframe logic with strict ADX gating and cleaned momentum checks.
     """
-    # Safety: ensure we have enough candles to avoid out-of-bounds
     min_required = 8
     if len(df_5m) < min_required:
         return {
@@ -84,6 +158,11 @@ def check_entry(df_5m, df_15m, df_1h, df_4h):
     last1h = df_1h.iloc[-1]
     last4h = df_4h.iloc[-1]
 
+    adx5 = float(last5.get("adx", 0))
+    adx15 = float(last15.get("adx", 0))
+    adx1h = float(last1h.get("adx", 0))
+    adx4h = float(last4h.get("adx", 0))
+
     trend_1h = _trend(last1h)
     trend_4h = _trend(last4h)
     mid_trend = _trend(last15)
@@ -94,8 +173,17 @@ def check_entry(df_5m, df_15m, df_1h, df_4h):
 
     status_msg = (
         f"Trend 4H/1H/15m: {trend_4h}/{trend_1h}/{mid_trend} | "
-        f"ADX5m={last5['adx']:.1f}"
+        f"ADX5m={adx5:.1f} ADX15m={adx15:.1f}"
     )
+
+    adx_conf, tier5, tier15, tier1h, tier4h = _compute_adx_conf(adx5, adx15, adx1h, adx4h)
+    if adx_conf == "blocked":
+        return {
+            "action": "NO_TRADE",
+            "reason": "ADX below 20 blocks entry",
+            "market_status": status_msg,
+            "signal_type": "SCALP",
+        }
 
     if trend_1h != trend_4h or trend_1h == "neutral":
         return {
@@ -105,7 +193,6 @@ def check_entry(df_5m, df_15m, df_1h, df_4h):
             "signal_type": "SCALP",
         }
 
-    # Allow mid_trend to be neutral; only block if it disagrees (bullish vs bearish)
     if mid_trend not in (trend_1h, "neutral"):
         return {
             "action": "NO_TRADE",
@@ -118,58 +205,39 @@ def check_entry(df_5m, df_15m, df_1h, df_4h):
     price = last5["close"]
     ema50 = last5["ema50"]
     ema200 = last5["ema200"]
-    # Slightly lower ADX threshold to allow trades in moderate momentum
-    adx_ok = last5["adx"] >= 15
-    over_extension = abs(price - ema50) / price
-    # Use higher timeframe ATR for SL (safer) and 5m ATR for TP (tighter)
+    over_extension = abs(price - ema50) / ema50
+
     def _calc_sl_tp(direction):
         return calculate_sl_tp(
             price,
             tp_atr,
             direction,
-            sl_atr_mult=1.0,
+            sl_atr_mult=1.2,
             tp_atr_mult=1.0,
             sl_atr=sl_atr,
-            sl_max_dist=20.0,
-            tp_max_dist=7.0,
+            sl_max_dist=25.0,
+            tp_max_dist=12.0,
         )
 
-    # BUY setup
+    rsi_cross = detect_rsi_cross(prev5.get("rsi"), last5.get("rsi"))
+    macd_up = strong_macd_momentum(df_5m, "bullish")
+    macd_down = strong_macd_momentum(df_5m, "bearish")
+    emoji = _confidence_emoji(adx_conf)
+
     if main_trend == "bullish":
-        strict_buy = (
+        buy_ok = (
             price > ema50 > ema200
-            and last5["rsi"] > 58
-            and last5["rsi"] < 75
-            and last5["macd"] > last5["macd_signal"]
-            and last5["stoch_k"] > last5["stoch_d"] > 50
-            and adx_ok
-            and price >= last5["don_high"]
-            and _momentum_check(last5, prev5)
-            and over_extension < 0.02  # allow modest extension for scalp
-        )
-        relaxed_buy = (
-            price > ema50 > ema200
-            and last5["rsi"] > 54
-            and last5["macd"] > last5["macd_signal"]
-            and last5["stoch_k"] > last5["stoch_d"]
-            and last5["adx"] >= 15
-            and over_extension < 0.03
-        )
-        # Scalping fallback: allow a softer breakout when HTF are aligned
-        fallback_buy = (
-            price > ema50 > ema200
-            and last5["rsi"] > 50
-            and last5["macd"] > last5["macd_signal"]
+            and rsi_cross == "bullish"
+            and macd_up
             and last5["stoch_k"] >= last5["stoch_d"]
-            and last5["adx"] >= 12
+            and over_extension < 0.01
         )
-
-        if strict_buy:
+        if buy_ok:
             sl, tp = _calc_sl_tp("BUY")
             return {
                 "action": "BUY",
-                "confidence": "HIGH",
-                "confidence_emoji": "⭐⭐⭐",
+                "confidence": adx_conf,
+                "confidence_emoji": emoji,
                 "entry": float(price),
                 "sl": sl,
                 "tp": tp,
@@ -177,99 +245,26 @@ def check_entry(df_5m, df_15m, df_1h, df_4h):
                 "market_status": status_msg,
                 "signal_type": "SCALP",
             }
-        if relaxed_buy:
-            sl, tp = _calc_sl_tp("BUY")
-            return {
-                "action": "BUY",
-                "confidence": "MEDIUM",
-                "confidence_emoji": "⭐⭐",
-                "entry": float(price),
-                "sl": sl,
-                "tp": tp,
-                "timeframe": "5m",
-                "market_status": status_msg,
-                "signal_type": "SCALP",
-            }
-        if fallback_buy:
-            sl, tp = _calc_sl_tp("BUY")
-            return {
-                "action": "BUY",
-                "confidence": "LOW",
-                "confidence_emoji": "⭐",
-                "entry": float(price),
-                "sl": sl,
-                "tp": tp,
-                "timeframe": "5m",
-                "market_status": status_msg + " | fallback",
-                "signal_type": "SCALP",
-            }
 
-    # SELL setup
     if main_trend == "bearish":
-        strict_sell = (
+        sell_ok = (
             price < ema50 < ema200
-            and last5["rsi"] < 42
-            and last5["rsi"] > 20
-            and last5["macd"] < last5["macd_signal"]
-            and last5["stoch_k"] < last5["stoch_d"] < 50
-            and adx_ok
-            and price <= last5["don_low"]
-            and _momentum_down(last5, prev5)  # histogram falling
-            and over_extension < 0.0035
-        )
-        relaxed_sell = (
-            price < ema50 < ema200
-            and last5["rsi"] < 46
-            and last5["macd"] < last5["macd_signal"]
-            and last5["stoch_k"] < last5["stoch_d"]
-            and last5["adx"] >= 15
-            and over_extension < 0.005
-        )
-        fallback_sell = (
-            price < ema50 < ema200
-            and last5["rsi"] < 50
-            and last5["macd"] < last5["macd_signal"]
+            and rsi_cross == "bearish"
+            and macd_down
             and last5["stoch_k"] <= last5["stoch_d"]
-            and last5["adx"] >= 12
+            and over_extension < 0.01
         )
-
-        if strict_sell:
+        if sell_ok:
             sl, tp = _calc_sl_tp("SELL")
             return {
                 "action": "SELL",
-                "confidence": "HIGH",
-                "confidence_emoji": "⭐⭐⭐",
+                "confidence": adx_conf,
+                "confidence_emoji": emoji,
                 "entry": float(price),
                 "sl": sl,
                 "tp": tp,
                 "timeframe": "5m",
                 "market_status": status_msg,
-                "signal_type": "SCALP",
-            }
-        if relaxed_sell:
-            sl, tp = _calc_sl_tp("SELL")
-            return {
-                "action": "SELL",
-                "confidence": "MEDIUM",
-                "confidence_emoji": "⭐⭐",
-                "entry": float(price),
-                "sl": sl,
-                "tp": tp,
-                "timeframe": "5m",
-                "market_status": status_msg,
-                "signal_type": "SCALP",
-            }
-        if fallback_sell:
-            sl, tp = _calc_sl_tp("SELL")
-            return {
-                "action": "SELL",
-                "confidence": "LOW",
-                "confidence_emoji": "⭐",
-                "entry": float(price),
-                "sl": sl,
-                "tp": tp,
-                "timeframe": "5m",
-                "market_status": status_msg + " | fallback",
                 "signal_type": "SCALP",
             }
 
@@ -283,15 +278,8 @@ def check_entry(df_5m, df_15m, df_1h, df_4h):
 
 def check_supertrend_entry(df_5m, df_15m, df_1h, df_4h):
     """
-    SuperTrend-only signals (⭐ Simple & Fast)
-    
-    Logic:
-    - Uses SuperTrend indicator on multiple timeframes
-    - BUY when price is above SuperTrend (direction = 1)
-    - SELL when price is below SuperTrend (direction = -1)
-    - Requires alignment across 15m, 1H, and 4H
+    SuperTrend-only signals (Simple & Fast) with strict ADX gating.
     """
-    # Safety: avoid index errors when data is still loading
     if len(df_5m) == 0 or len(df_15m) == 0 or len(df_1h) == 0 or len(df_4h) == 0:
         return {
             "action": "NO_TRADE",
@@ -308,60 +296,56 @@ def check_supertrend_entry(df_5m, df_15m, df_1h, df_4h):
     tp_atr = float(last5.get("atr", sl_atr if sl_atr else 0))
     if sl_atr <= 0:
         sl_atr = tp_atr
-    sl_atr = float(last1h.get("atr", last5.get("atr", 0)))
-    tp_atr = float(last5.get("atr", sl_atr if sl_atr else 0))
-    if sl_atr <= 0:
-        sl_atr = tp_atr
-    sl_atr = float(last1h.get("atr", last5.get("atr", 0)))
-    tp_atr = float(last5.get("atr", sl_atr if sl_atr else 0))
-    if sl_atr <= 0:
-        sl_atr = tp_atr
-    
-    # Check if SuperTrend columns exist
+
+    adx_conf, tier5, tier15, tier1h, tier4h = _compute_adx_conf(
+        float(last5.get("adx", 0)),
+        float(last15.get("adx", 0)),
+        float(last1h.get("adx", 0)),
+        float(last4h.get("adx", 0)),
+    )
+
     if 'supertrend_direction' not in last5.index:
         return {
             "action": "NO_TRADE",
             "reason": "SuperTrend indicator not calculated",
             "signal_type": "SUPERTREND"
         }
-    
-    # Get SuperTrend directions
+
     st_5m = last5['supertrend_direction']
     st_15m = last15['supertrend_direction']
     st_1h = last1h['supertrend_direction']
     st_4h = last4h['supertrend_direction']
-    
-    status_msg = f"SuperTrend: 4H={'🟢' if st_4h == 1 else '🔴'}, 1H={'🟢' if st_1h == 1 else '🔴'}, 15m={'🟢' if st_15m == 1 else '🔴'}, 5m={'🟢' if st_5m == 1 else '🔴'}"
 
-    # Extra precision: require 5m price to be on the correct side of its ST and a minimum ADX
-    adx_ok = last5.get("adx", 0) >= 15
+    status_msg = f"SuperTrend: 4H={'dYY›' if st_4h == 1 else 'dY\"''}, 1H={'dYY›' if st_1h == 1 else 'dY\"''}, 15m={'dYY›' if st_15m == 1 else 'dY\"''}, 5m={'dYY›' if st_5m == 1 else 'dY\"''}"
+
     price = last5["close"]
     st_val = last5.get("supertrend", price)
     price_on_side = (price > st_val) if st_5m == 1 else (price < st_val)
-    if not adx_ok or not price_on_side:
+    if adx_conf == "blocked" or not price_on_side:
         return {
             "action": "NO_TRADE",
-            "reason": f"SuperTrend needs stronger confirmation (adx_ok={adx_ok}, price_on_side={price_on_side})",
+            "reason": f"SuperTrend needs stronger confirmation (adx_conf={adx_conf}, price_on_side={price_on_side})",
             "market_status": status_msg,
             "signal_type": "SUPERTREND",
         }
-    
-    # BUY Signal: All higher timeframes bullish (direction = 1)
+
+    emoji = _confidence_emoji(adx_conf)
+
     if st_4h == 1 and st_1h == 1 and st_15m == 1 and st_5m == 1:
         sl, tp = calculate_sl_tp(
             last5["close"],
             tp_atr,
             "BUY",
-            sl_atr_mult=1.0,
+            sl_atr_mult=1.2,
             tp_atr_mult=1.0,
             sl_atr=sl_atr,
-            sl_max_dist=20.0,
-            tp_max_dist=7.0,
+            sl_max_dist=25.0,
+            tp_max_dist=12.0,
         )
         return {
             "action": "BUY",
-            "confidence": "SUPERTREND",
-            "confidence_emoji": "⭐",
+            "confidence": adx_conf,
+            "confidence_emoji": emoji,
             "signal_type": "SUPERTREND",
             "entry": float(last5["close"]),
             "sl": sl,
@@ -369,23 +353,22 @@ def check_supertrend_entry(df_5m, df_15m, df_1h, df_4h):
             "timeframe": "5m",
             "market_status": status_msg
         }
-    
-    # SELL Signal: All higher timeframes bearish (direction = -1)
+
     if st_4h == -1 and st_1h == -1 and st_15m == -1 and st_5m == -1:
         sl, tp = calculate_sl_tp(
             last5["close"],
             tp_atr,
             "SELL",
-            sl_atr_mult=1.0,
+            sl_atr_mult=1.2,
             tp_atr_mult=1.0,
             sl_atr=sl_atr,
-            sl_max_dist=20.0,
-            tp_max_dist=7.0,
+            sl_max_dist=25.0,
+            tp_max_dist=12.0,
         )
         return {
             "action": "SELL",
-            "confidence": "SUPERTREND",
-            "confidence_emoji": "⭐",
+            "confidence": adx_conf,
+            "confidence_emoji": emoji,
             "signal_type": "SUPERTREND",
             "entry": float(last5["close"]),
             "sl": sl,
@@ -393,7 +376,7 @@ def check_supertrend_entry(df_5m, df_15m, df_1h, df_4h):
             "timeframe": "5m",
             "market_status": status_msg
         }
-    
+
     return {
         "action": "NO_TRADE",
         "reason": "SuperTrend signals not aligned across timeframes",
@@ -405,15 +388,7 @@ def check_supertrend_entry(df_5m, df_15m, df_1h, df_4h):
 def check_golden_entry(df_5m, df_15m, df_1h, df_4h):
     """
     Very strict confluence filter for high-confidence scalps.
-    This does NOT guarantee outcomes; it simply tightens filters:
-    - All timeframes agree on trend (price & supertrend)
-    - Strong ADX on 5m and 15m
-    - RSI in healthy zone (not overextended)
-    - MACD and Stoch aligned
-    - Price near Donchian breakout with limited extension from EMA50
-    Returns BUY/SELL or NO_TRADE.
     """
-    # Basic safety
     if min(len(df_5m), len(df_15m), len(df_1h), len(df_4h)) < 10:
         return {
             "action": "NO_TRADE",
@@ -426,40 +401,29 @@ def check_golden_entry(df_5m, df_15m, df_1h, df_4h):
     last1h = df_1h.iloc[-1]
     last4h = df_4h.iloc[-1]
 
-    # Trend agreement via EMAs
     trend_5 = _trend(last5)
     trend_15 = _trend(last15)
     trend_1h = _trend(last1h)
     trend_4h = _trend(last4h)
 
-    # SuperTrend agreement if available
-    st_cols = all("supertrend_direction" in x.index for x in (last5, last15, last1h, last4h))
-    st_agree = False
-    st_align_with_trend = True
-    if st_cols:
-        st_list = [
-            last5["supertrend_direction"],
-            last15["supertrend_direction"],
-            last1h["supertrend_direction"],
-            last4h["supertrend_direction"],
-        ]
-        st_agree = len(set(st_list)) == 1
-        # allow majority alignment with price trend even if one TF lags
-        majority = 1 if st_list.count(1) >= 3 else (-1 if st_list.count(-1) >= 3 else 0)
-        if majority != 0:
-            st_align_with_trend = (
-                (majority == 1 and trend_5 == "bullish") or (majority == -1 and trend_5 == "bearish")
-            )
+    adx_conf, tier5, tier15, tier1h, tier4h = _compute_adx_conf(
+        float(last5.get("adx", 0)),
+        float(last15.get("adx", 0)),
+        float(last1h.get("adx", 0)),
+        float(last4h.get("adx", 0)),
+    )
+    if adx_conf == "blocked":
+        return {
+            "action": "NO_TRADE",
+            "reason": "ADX below 20 blocks entry",
+            "signal_type": "GOLDEN",
+        }
 
-    adx5 = last5.get("adx", 0)
-    adx15 = last15.get("adx", 0)
-    over_ext = abs(last5["close"] - last5["ema50"]) / max(last5["close"], 1e-6)
     status_msg = (
         f"Trend 4H/1H/15m/5m: {trend_4h}/{trend_1h}/{trend_15}/{trend_5} | "
-        f"ADX5m={adx5:.1f}, ADX15m={adx15:.1f} | over_ext={over_ext:.4f}"
+        f"ADX5m={float(last5.get('adx',0)):.1f}, ADX15m={float(last15.get('adx',0)):.1f}"
     )
 
-    # Require clear trend alignment
     if trend_4h != trend_1h or trend_1h != trend_15 or trend_15 != trend_5:
         return {
             "action": "NO_TRADE",
@@ -468,32 +432,35 @@ def check_golden_entry(df_5m, df_15m, df_1h, df_4h):
             "signal_type": "GOLDEN",
         }
 
-    # BUY conditions
+    over_ext = abs(last5["close"] - last5["ema50"]) / last5["ema50"]
+    rsi_cross = detect_rsi_cross(df_5m.iloc[-2].get("rsi"), last5.get("rsi"))
+    macd_up = strong_macd_momentum(df_5m, "bullish")
+    macd_down = strong_macd_momentum(df_5m, "bearish")
+    emoji = _confidence_emoji(adx_conf)
+
     if trend_5 == "bullish":
         conds = [
-            adx5 >= 22,
-            adx15 >= 18,
-            40 <= last5["rsi"] <= 100,
-            last5["macd"] > last5["macd_signal"],
-            last5["stoch_k"] > last5["stoch_d"] > 50,
-            over_ext < 0.05,
-            last5["close"] >= last5["don_high"] * 0.999,  # allow tiny slack on breakout
+            rsi_cross == "bullish",
+            macd_up,
+            last5["stoch_k"] > last5["stoch_d"],
+            over_ext < 0.005,
+            last5["close"] >= last5["don_high"] * 0.999,
         ]
         if all(conds):
             sl, tp = calculate_sl_tp(
                 last5["close"],
-                tp_atr,
+                float(last5.get("atr", 0)),
                 "BUY",
-                sl_atr_mult=1.0,
+                sl_atr_mult=1.2,
                 tp_atr_mult=1.0,
-                sl_atr=sl_atr,
-                sl_max_dist=20.0,
-                tp_max_dist=7.0,
+                sl_atr=float(last1h.get("atr", last5.get("atr", 0))),
+                sl_max_dist=25.0,
+                tp_max_dist=12.0,
             )
             return {
                 "action": "BUY",
-                "confidence": "HIGH",
-                "confidence_emoji": "⭐⭐⭐",
+                "confidence": adx_conf,
+                "confidence_emoji": emoji,
                 "signal_type": "GOLDEN",
                 "entry": float(last5["close"]),
                 "sl": sl,
@@ -502,32 +469,29 @@ def check_golden_entry(df_5m, df_15m, df_1h, df_4h):
                 "market_status": status_msg,
             }
 
-    # SELL conditions
     if trend_5 == "bearish":
         conds = [
-            adx5 >= 22,
-            adx15 >= 18,
-            32 <= last5["rsi"] <= 45,
-            last5["macd"] < last5["macd_signal"],
-            last5["stoch_k"] < last5["stoch_d"] < 50,
-            over_ext < 0.02,
+            rsi_cross == "bearish",
+            macd_down,
+            last5["stoch_k"] < last5["stoch_d"],
+            over_ext < 0.005,
             last5["close"] <= last5["don_low"],
         ]
         if all(conds):
             sl, tp = calculate_sl_tp(
                 last5["close"],
-                tp_atr,
+                float(last5.get("atr", 0)),
                 "SELL",
-                sl_atr_mult=1.0,
+                sl_atr_mult=1.2,
                 tp_atr_mult=1.0,
-                sl_atr=sl_atr,
-                sl_max_dist=20.0,
-                tp_max_dist=7.0,
+                sl_atr=float(last1h.get("atr", last5.get("atr", 0))),
+                sl_max_dist=25.0,
+                tp_max_dist=12.0,
             )
             return {
                 "action": "SELL",
-                "confidence": "HIGH",
-                "confidence_emoji": "⭐⭐⭐",
+                "confidence": adx_conf,
+                "confidence_emoji": emoji,
                 "signal_type": "GOLDEN",
                 "entry": float(last5["close"]),
                 "sl": sl,
