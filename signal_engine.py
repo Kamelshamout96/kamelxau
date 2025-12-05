@@ -128,7 +128,7 @@ def _compute_adx_conf(adx5, adx15, adx1h=None, adx4h=None):
 
 
 def _confidence_emoji(conf):
-    return "ƒ-?ƒ-?ƒ-?" if conf == "HIGH" else ("ƒ-?ƒ-?" if conf == "MEDIUM" else "ƒ-?")
+    return "⭐️⭐️⭐️" if conf == "HIGH" else ("⭐️⭐️" if conf == "MEDIUM" else "⭐️")
 
 
 def check_entry(df_5m, df_15m, df_1h, df_4h):
