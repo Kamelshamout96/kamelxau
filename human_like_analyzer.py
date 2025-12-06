@@ -651,28 +651,41 @@ class HumanLikeAnalyzer:
                         position = max(0, min(100, position))
                         
                         if position < 25:
-                            story_parts.append(f"📍 Near channel support ({position:.0f}% in channel)")
+                            story_parts.append(f"📍 Gravitating toward channel support ({position:.0f}% in channel)")
                         elif position > 75:
-                            story_parts.append(f"📍 Near channel resistance ({position:.0f}% in channel)")
+                            story_parts.append(f"📍 Extending toward channel resistance ({position:.0f}% in channel)")
+                        elif position < 40:
+                            story_parts.append(f"📍 Lower channel zone ({position:.0f}%) - near demand")
+                        elif position > 60:
+                            story_parts.append(f"📍 Upper channel zone ({position:.0f}%) - near supply")
                         else:
-                            story_parts.append(f"📍 Mid-channel ({position:.0f}%)")
+                            story_parts.append(f"📍 Mid-channel equilibrium ({position:.0f}%)")
             
             if structure and len(structure) > 0:
-                story_parts.append(f"📈 {structure[0]}")
+                if "Bullish" in str(structure):
+                    story_parts.append(f"📈 {structure[0]} | Continuation bias: Upward")
+                elif "Bearish" in str(structure):
+                    story_parts.append(f"📉 {structure[0]} | Continuation bias: Downward")
+                else:
+                    story_parts.append(f"📊 {structure[0]}")
             
             if nearest_support and current_price > 0:
                 dist = ((current_price - nearest_support.price) / current_price) * 100
-                if dist < 2:
-                    story_parts.append(f"🛡️ At support ${nearest_support.price:.2f}")
+                if dist < 1:
+                    story_parts.append(f"🛡️ Testing support ${nearest_support.price:.2f} ({nearest_support.strength}x touches)")
+                elif dist < 2.5:
+                    story_parts.append(f"🛡️ Approaching support ${nearest_support.price:.2f} ({dist:.1f}% away, {nearest_support.strength}x touches)")
                 else:
-                    story_parts.append(f"🛡️ Support ${nearest_support.price:.2f} ({dist:.1f}% below)")
+                    story_parts.append(f"🛡️ Support ${nearest_support.price:.2f} ({dist:.1f}% below, {nearest_support.strength}x touches)")
             
             if nearest_resistance and current_price > 0:
                 dist = ((nearest_resistance.price - current_price) / current_price) * 100
-                if dist < 2:
-                    story_parts.append(f"🚧 At resistance ${nearest_resistance.price:.2f}")
+                if dist < 1:
+                    story_parts.append(f"🚧 Testing resistance ${nearest_resistance.price:.2f} ({nearest_resistance.strength}x touches)")
+                elif dist < 2.5:
+                    story_parts.append(f"🚧 Approaching resistance ${nearest_resistance.price:.2f} ({dist:.1f}% away, {nearest_resistance.strength}x touches)")
                 else:
-                    story_parts.append(f"🚧 Resistance ${nearest_resistance.price:.2f} ({dist:.1f}% above)")
+                    story_parts.append(f"🚧 Resistance ${nearest_resistance.price:.2f} ({dist:.1f}% above, {nearest_resistance.strength}x touches)")
             
             if sweeps:
                 story_parts.append(sweeps[0])
@@ -877,8 +890,13 @@ class HumanLikeAnalyzer:
                         if 0.01 < distance_to_channel_support < 0.03:  # 1-3% away
                             action = 'BUY'
                             early_prediction = True
+                            proximity_pct = distance_to_channel_support * 100
                             reasoning.append("⚠️ NOTE: Early Prediction Signal - Approaching channel support")
-                            reasoning.append(f"   Price ${current_price:.2f} → Target support ${channel.lower_line.end_price:.2f}")
+                            reasoning.append(f"   📍 Current: ${current_price:.2f} | Target: ${channel.lower_line.end_price:.2f} ({proximity_pct:.1f}% away)")
+                            reasoning.append(f"   💡 Market gravitating toward ascending channel demand zone")
+                            if structure:
+                                reasoning.append(f"   📊 Structure context: {', '.join(structure[:2])} - supports continuation")
+                            reasoning.append(f"   🎯 Pullback behavior in uptrend - typical compression before bounce")
                             confidence = 65
                 
                 elif channel and 'down' in channel.pattern_type:
@@ -887,8 +905,13 @@ class HumanLikeAnalyzer:
                         if 0.01 < distance_to_channel_resistance < 0.03:  # 1-3% away
                             action = 'SELL'
                             early_prediction = True
+                            proximity_pct = distance_to_channel_resistance * 100
                             reasoning.append("⚠️ NOTE: Early Prediction Signal - Approaching channel resistance")
-                            reasoning.append(f"   Price ${current_price:.2f} → Target resistance ${channel.upper_line.end_price:.2f}")
+                            reasoning.append(f"   📍 Current: ${current_price:.2f} | Target: ${channel.upper_line.end_price:.2f} ({proximity_pct:.1f}% away)")
+                            reasoning.append(f"   💡 Market rallying into descending channel supply zone")
+                            if structure:
+                                reasoning.append(f"   📊 Structure context: {', '.join(structure[:2])} - supports rejection")
+                            reasoning.append(f"   🎯 Rally behavior in downtrend - typical bounce before continuation")
                             confidence = 65
                 
                 # Check if approaching major support/resistance (1-2.5% away)
@@ -899,8 +922,14 @@ class HumanLikeAnalyzer:
                         if structure and any("Bullish" in s or "HH" in s or "HL" in s for s in structure):
                             action = 'BUY'
                             early_prediction = True
+                            proximity_pct = distance_to_support * 100
                             reasoning.append("⚠️ NOTE: Early Prediction Signal - Approaching major support")
-                            reasoning.append(f"   Price ${current_price:.2f} → Support ${nearest_support.price:.2f} ({nearest_support.strength} touches)")
+                            reasoning.append(f"   📍 Current: ${current_price:.2f} | Target: ${nearest_support.price:.2f} ({proximity_pct:.1f}% away)")
+                            reasoning.append(f"   🛡️ Major support with {nearest_support.strength} historical touches - strong magnetic level")
+                            reasoning.append(f"   📊 {structure[0] if structure else 'Bullish structure'} suggests buying pressure will increase near support")
+                            if sweeps:
+                                reasoning.append(f"   ⚡ {sweeps[0]} - liquidity absorption in progress")
+                            reasoning.append(f"   💡 Price compressing toward proven demand - early positioning opportunity")
                             confidence = 60
                 
                 if not early_prediction and nearest_resistance:
@@ -910,8 +939,14 @@ class HumanLikeAnalyzer:
                         if structure and any("Bearish" in s or "LH" in s or "LL" in s for s in structure):
                             action = 'SELL'
                             early_prediction = True
+                            proximity_pct = distance_to_resistance * 100
                             reasoning.append("⚠️ NOTE: Early Prediction Signal - Approaching major resistance")
-                            reasoning.append(f"   Price ${current_price:.2f} → Resistance ${nearest_resistance.price:.2f} ({nearest_resistance.strength} touches)")
+                            reasoning.append(f"   📍 Current: ${current_price:.2f} | Target: ${nearest_resistance.price:.2f} ({proximity_pct:.1f}% away)")
+                            reasoning.append(f"   🚧 Major resistance with {nearest_resistance.strength} historical touches - strong distribution zone")
+                            reasoning.append(f"   📊 {structure[0] if structure else 'Bearish structure'} suggests selling pressure will increase near resistance")
+                            if sweeps:
+                                reasoning.append(f"   ⚡ {sweeps[0]} - liquidity grab in progress")
+                            reasoning.append(f"   💡 Price extending toward proven supply - early positioning opportunity")
                             confidence = 60
             
             sl = self.calculate_structural_sl(action, entry, nearest_support, nearest_resistance, zones, channel, atr)
