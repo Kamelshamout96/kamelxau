@@ -3,7 +3,7 @@ import time
 import requests
 import pandas as pd
 from pathlib import Path
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import yfinance as yf
 from bs4 import BeautifulSoup
 
@@ -17,6 +17,66 @@ CACHE_DURATION = timedelta(seconds=30)  # Refresh data every 30 seconds for real
 
 class DataError(Exception):
     pass
+
+
+def isMarketOpen(nowUtc: datetime) -> bool:
+    """
+    CME gold trading hours (UTC):
+    - Daily break: 22:00 -> 23:00 (closed)
+    - Weekly break: Friday 22:00 -> Sunday 23:00 (closed)
+    """
+    if nowUtc.tzinfo is None:
+        nowUtc = nowUtc.replace(tzinfo=timezone.utc)
+    else:
+        nowUtc = nowUtc.astimezone(timezone.utc)
+
+    weekday = nowUtc.weekday()  # Monday=0, Sunday=6
+    hour = nowUtc.hour
+
+    # Daily 1-hour break
+    if 22 <= hour < 23:
+        return False
+
+    # Weekly break: Fri 22:00 through Sun 23:00
+    if weekday == 4 and hour >= 22:
+        return False
+    if weekday in (5,):  # Saturday
+        return False
+    if weekday == 6 and hour < 23:  # Sunday before 23:00
+        return False
+
+    return True
+
+
+def nextMarketOpen(nowUtc: datetime) -> datetime:
+    """
+    Compute next market open time in UTC based on CME hours.
+    """
+    if nowUtc.tzinfo is None:
+        nowUtc = nowUtc.replace(tzinfo=timezone.utc)
+    else:
+        nowUtc = nowUtc.astimezone(timezone.utc)
+
+    weekday = nowUtc.weekday()
+    hour = nowUtc.hour
+    minute = nowUtc.minute
+
+    # If within daily break
+    if 22 <= hour < 23 and weekday not in (5,):  # not Saturday
+        return nowUtc.replace(hour=23, minute=0, second=0, microsecond=0)
+
+    # If before daily break on an open day (Mon-Thu and Sun after 23:00)
+    if weekday in (0, 1, 2, 3):  # Mon-Thu
+        return nowUtc
+    if weekday == 6 and hour >= 23:  # Sunday after reopen
+        return nowUtc
+
+    # Weekly reopen: Sunday 23:00 UTC
+    days_ahead = (6 - weekday) % 7  # days until Sunday
+    reopen = (nowUtc + timedelta(days=days_ahead)).replace(hour=23, minute=0, second=0, microsecond=0)
+    if reopen <= nowUtc:
+        reopen = reopen + timedelta(days=7)
+    return reopen
 
 
 def clean_yf_data(df):

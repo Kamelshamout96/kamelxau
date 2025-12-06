@@ -1,11 +1,12 @@
 import json
 import os
 import threading
+from datetime import datetime, timezone
 from pathlib import Path
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 
-from utils import send_telegram, DataError
+from utils import send_telegram, DataError, isMarketOpen
 from live_data_collector import (
     append_live_price,
     get_live_collected_data,
@@ -131,9 +132,18 @@ def root():
 @app.get("/health")
 def health():
     """Health check endpoint for monitoring"""
+    now_utc = datetime.now(timezone.utc)
+    market_state = "OPEN" if isMarketOpen(now_utc) else "CLOSED"
+    if market_state == "CLOSED":
+        nxt = nextMarketOpen(now_utc).astimezone(ZoneInfo("Asia/Riyadh"))
+        nxt_str = nxt.isoformat()
+    else:
+        nxt_str = None
     return {
         "status": "healthy",
-        "telegram": "configured" if (TG_TOKEN and TG_CHAT) else "not configured"
+        "telegram": "configured" if (TG_TOKEN and TG_CHAT) else "not configured",
+        "market_status": market_state,
+        "market_next_open_riyadh": nxt_str,
     }
 
 

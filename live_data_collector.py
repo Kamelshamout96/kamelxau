@@ -8,7 +8,7 @@ This replaces the previous CSV-based storage to avoid losing data on deploy/rest
 import json
 import os
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -16,7 +16,7 @@ import pandas as pd
 import gspread
 from google.oauth2.service_account import Credentials
 
-from utils import DataError, get_live_gold_price_usa
+from utils import DataError, get_live_gold_price_usa, isMarketOpen
 
 # Simple in-process cache to reduce external reads (Sheets API quotas)
 CACHE_TTL_SECONDS = 300  # 5 minutes
@@ -107,6 +107,11 @@ def append_live_price():
     Fetch current live gold price and append it into Sheets as a 1-minute candle.
     """
     try:
+        now_utc = datetime.now(timezone.utc)
+        if not isMarketOpen(now_utc):
+            print("[SKIP] Market closed, skipping price insert")
+            return None, None
+
         price = get_live_gold_price_usa()
         # Use Riyadh local time for storage (tz-aware) then store ISO with offset
         current_time = datetime.now(ZoneInfo("Asia/Riyadh"))
