@@ -819,6 +819,7 @@ class HumanLikeAnalyzer:
             
             visual_prediction = len(df) < 20
             
+            # PRIORITY 1: Channel patterns (highest priority)
             if channel and 'up' in channel.pattern_type:
                 if nearest_support and current_price > 0:
                     distance = (current_price - nearest_support.price) / current_price
@@ -827,13 +828,7 @@ class HumanLikeAnalyzer:
                         reasoning.append("✓✓ BUY at ascending channel support")
                         confidence += 20
             
-            elif active_demand:
-                strongest = max(active_demand, key=lambda z: z.strength)
-                action = 'BUY'
-                reasoning.append(f"✓✓ BUY from demand zone (strength {strongest.strength}/5)")
-                confidence += 18
-            
-            if channel and 'down' in channel.pattern_type:
+            elif channel and 'down' in channel.pattern_type:
                 if nearest_resistance and current_price > 0:
                     distance = (nearest_resistance.price - current_price) / current_price
                     if distance < 0.01:
@@ -841,12 +836,25 @@ class HumanLikeAnalyzer:
                         reasoning.append("✓✓ SELL at descending channel resistance")
                         confidence += 20
             
-            elif active_supply:
-                strongest = max(active_supply, key=lambda z: z.strength)
-                action = 'SELL'
-                reasoning.append(f"✓✓ SELL from supply zone (strength {strongest.strength}/5)")
-                confidence += 18
+            # PRIORITY 2: Supply/Demand zones (only if no channel or channel neutral)
+            if action == 'NO_TRADE':
+                if active_demand:
+                    # Only BUY from demand if NOT in bearish channel
+                    if not (channel and 'down' in channel.pattern_type):
+                        strongest = max(active_demand, key=lambda z: z.strength)
+                        action = 'BUY'
+                        reasoning.append(f"✓✓ BUY from demand zone (strength {strongest.strength}/5)")
+                        confidence += 18
+                
+                elif active_supply:
+                    # Only SELL from supply if NOT in bullish channel
+                    if not (channel and 'up' in channel.pattern_type):
+                        strongest = max(active_supply, key=lambda z: z.strength)
+                        action = 'SELL'
+                        reasoning.append(f"✓✓ SELL from supply zone (strength {strongest.strength}/5)")
+                        confidence += 18
             
+            # PRIORITY 3: Visual prediction mode
             if action == 'NO_TRADE' and visual_prediction:
                 if channel:
                     if 'up' in channel.pattern_type:
