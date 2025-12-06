@@ -577,10 +577,22 @@ class HumanLikeAnalyzer:
                 tp1 = float(nearest_resistance.price if nearest_resistance else entry + (atr * 1.5))
                 tp2 = float(channel.upper_line.end_price if (channel and channel.upper_line) else tp1 + (atr * 1.5))
                 tp3 = float(channel.target_price if (channel and channel.target_price) else tp2 + (atr * 2.0))
+
+                # Enforce monotonic, above-entry targets to avoid invalid TP ordering
+                min_tp1 = entry + (atr * 0.5)
+                tp1 = max(tp1, min_tp1)
+                tp2 = max(tp2, tp1 + (atr * 0.5))
+                tp3 = max(tp3, tp2 + (atr * 0.5))
             else:
                 tp1 = float(nearest_support.price if nearest_support else entry - (atr * 1.5))
                 tp2 = float(channel.lower_line.end_price if (channel and channel.lower_line) else tp1 - (atr * 1.5))
                 tp3 = float(channel.target_price if (channel and channel.target_price) else tp2 - (atr * 2.0))
+
+                # Enforce monotonic, below-entry targets for SELL to keep TP hierarchy valid
+                max_tp1 = entry - (atr * 0.5)
+                tp1 = min(tp1, max_tp1)
+                tp2 = min(tp2, tp1 - (atr * 0.5))
+                tp3 = min(tp3, tp2 - (atr * 0.5))
             
             return round(tp1, 2), round(tp2, 2), round(tp3, 2)
         except Exception:
