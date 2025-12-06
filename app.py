@@ -6,7 +6,7 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 
-from utils import send_telegram, DataError, isMarketOpen
+from utils import send_telegram, DataError, isMarketOpen, nextMarketOpen
 from live_data_collector import (
     append_live_price,
     get_live_collected_data,
