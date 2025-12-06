@@ -346,14 +346,22 @@ def human_analysis():
             levels_text = ""
             for level_name, level_price in tf_1h['key_levels'].items():
                 levels_text += f"\n  📍 {level_name}: ${level_price:.2f}"
-            
+
+            tp_lines = ""
+            for idx, key in enumerate(["tp1", "tp2", "tp3"], start=1):
+                val = rec.get(key)
+                if val is not None:
+                    tp_lines += f"✅ <b>TP{idx}:</b> ${val:.2f}\n"
+            if not tp_lines:
+                tp_lines = f"✅ <b>Take Profit:</b> ${rec['tp']:.2f}\n"
+
             msg = (
                 f"🎨 <b>{human_analysis_result['action']} - ANALYSIS</b>\n"
                 f"━━━━━━━━━━━━━━━━━━━━\n"
                 f"📊 <b>Current Price:</b> ${current_price:.2f}\n"
                 f"🎯 <b>Entry:</b> ${rec['entry']:.2f}\n"
                 f"🛑 <b>Stop Loss:</b> ${rec['sl']:.2f}\n"
-                f"✅ <b>Take Profit:</b> ${rec['tp']:.2f}\n"
+                f"{tp_lines}"
                 f"⚖️ <b>Risk:Reward:</b> 1:{tf_1h['risk_reward']:.2f}\n"
                 f"🔥 <b>Confidence:</b> {human_analysis_result['confidence']:.0f}%\n"
                 f"\n"
