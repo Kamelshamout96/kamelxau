@@ -924,7 +924,6 @@ class HumanLikeAnalyzer:
                             early_prediction = True
                             proximity_pct = distance_to_support * 100
                             reasoning.append("⚠️ NOTE: Early Prediction Signal - Approaching major support")
-                            reasoning.append(f"   📍 Current: ${current_price:.2f} | Target: ${nearest_support.price:.2f} ({proximity_pct:.1f}% away)")
                             reasoning.append(f"   🛡️ Major support with {nearest_support.strength} historical touches - strong magnetic level")
                             reasoning.append(f"   📊 {structure[0] if structure else 'Bullish structure'} suggests buying pressure will increase near support")
                             if sweeps:
@@ -941,7 +940,6 @@ class HumanLikeAnalyzer:
                             early_prediction = True
                             proximity_pct = distance_to_resistance * 100
                             reasoning.append("⚠️ NOTE: Early Prediction Signal - Approaching major resistance")
-                            reasoning.append(f"   📍 Current: ${current_price:.2f} | Target: ${nearest_resistance.price:.2f} ({proximity_pct:.1f}% away)")
                             reasoning.append(f"   🚧 Major resistance with {nearest_resistance.strength} historical touches - strong distribution zone")
                             reasoning.append(f"   📊 {structure[0] if structure else 'Bearish structure'} suggests selling pressure will increase near resistance")
                             if sweeps:
