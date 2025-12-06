@@ -327,6 +327,16 @@ def human_analysis():
         if human_analysis_result['action'] in ['BUY', 'SELL']:
             rec = human_analysis_result['recommendation']
             tf_1h = human_analysis_result['timeframe_analysis']['1H']
+            normalized = normalize_signal(
+                {
+                    "action": human_analysis_result.get("action"),
+                    "timeframe": "1H-HUMAN",
+                    "entry": rec.get("entry"),
+                    "sl": rec.get("sl"),
+                    "tp": rec.get("tp"),
+                    "market_status": "HUMAN",
+                }
+            )
             
             # Build reasoning text
             reasoning_text = "\n".join([f"  • {r}" for r in rec['reasoning'][:5]])
@@ -338,7 +348,7 @@ def human_analysis():
                 levels_text += f"\n  📍 {level_name}: ${level_price:.2f}"
             
             msg = (
-                f"🎨 <b>{human_analysis_result['action']} - HUMAN-LIKE ANALYSIS</b>\n"
+                f"🎨 <b>{human_analysis_result['action']} - ANALYSIS</b>\n"
                 f"━━━━━━━━━━━━━━━━━━━━\n"
                 f"📊 <b>Current Price:</b> ${current_price:.2f}\n"
                 f"🎯 <b>Entry:</b> ${rec['entry']:.2f}\n"
@@ -352,11 +362,16 @@ def human_analysis():
                 f"\n"
                 f"💡 <b>Analysis Reasoning:</b>\n{reasoning_text}\n"
                 f"━━━━━━━━━━━━━━━━━━━━\n"
-                f"<i>🎨 Professional trader-style analysis</i>"
             )
             
             if TG_TOKEN and TG_CHAT:
-                send_telegram(TG_TOKEN, TG_CHAT, msg)
+                last_signal = _load_last_signal()
+                already_sent = is_duplicate_signal(normalized, last_signal)
+                if not already_sent:
+                    send_telegram(TG_TOKEN, TG_CHAT, msg)
+                    _save_last_signal(normalized)
+                else:
+                    print("[info] human analysis signal already sent, skipping telegram")
         
         return human_analysis_result
     
