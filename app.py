@@ -355,9 +355,15 @@ def human_analysis():
             if not tp_lines:
                 tp_lines = f"✅ <b>Take Profit:</b> ${rec['tp']:.2f}\n"
 
+            # Check if early prediction
+            early_note = ""
+            if tf_1h.get('early_prediction', False):
+                early_note = "⚠️ <b>NOTE: EARLY PREDICTION SIGNAL</b>\n"
+
             msg = (
                 f"🎨 <b>{human_analysis_result['action']} - ANALYSIS</b>\n"
                 f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"{early_note}"
                 f"📊 <b>Current Price:</b> ${current_price:.2f}\n"
                 f"🎯 <b>Entry:</b> ${rec['entry']:.2f}\n"
                 f"🛑 <b>Stop Loss:</b> ${rec['sl']:.2f}\n"

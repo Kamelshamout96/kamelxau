@@ -102,6 +102,7 @@ class TradeSetup:
     structure_labels: List[str] = field(default_factory=list)
     next_move: str = ""
     visual_prediction: bool = False
+    early_prediction: bool = False
 
 
 class HumanLikeAnalyzer:
@@ -866,6 +867,53 @@ class HumanLikeAnalyzer:
                         reasoning.append("📊 Visual: Descending channel suggests rejection")
                         confidence = 60
             
+            # PRIORITY 4: Early Prediction Signal (approaching key levels)
+            early_prediction = False
+            if action == 'NO_TRADE' and current_price > 0:
+                # Check if approaching channel support/resistance (1-3% away)
+                if channel and 'up' in channel.pattern_type:
+                    if channel.lower_line and nearest_support:
+                        distance_to_channel_support = (current_price - channel.lower_line.end_price) / current_price
+                        if 0.01 < distance_to_channel_support < 0.03:  # 1-3% away
+                            action = 'BUY'
+                            early_prediction = True
+                            reasoning.append("⚠️ NOTE: Early Prediction Signal - Approaching channel support")
+                            reasoning.append(f"   Price ${current_price:.2f} → Target support ${channel.lower_line.end_price:.2f}")
+                            confidence = 65
+                
+                elif channel and 'down' in channel.pattern_type:
+                    if channel.upper_line and nearest_resistance:
+                        distance_to_channel_resistance = (channel.upper_line.end_price - current_price) / current_price
+                        if 0.01 < distance_to_channel_resistance < 0.03:  # 1-3% away
+                            action = 'SELL'
+                            early_prediction = True
+                            reasoning.append("⚠️ NOTE: Early Prediction Signal - Approaching channel resistance")
+                            reasoning.append(f"   Price ${current_price:.2f} → Target resistance ${channel.upper_line.end_price:.2f}")
+                            confidence = 65
+                
+                # Check if approaching major support/resistance (1-2.5% away)
+                if not early_prediction and nearest_support:
+                    distance_to_support = (current_price - nearest_support.price) / current_price
+                    if 0.01 < distance_to_support < 0.025:  # 1-2.5% away
+                        # Only if bullish structure
+                        if structure and any("Bullish" in s or "HH" in s or "HL" in s for s in structure):
+                            action = 'BUY'
+                            early_prediction = True
+                            reasoning.append("⚠️ NOTE: Early Prediction Signal - Approaching major support")
+                            reasoning.append(f"   Price ${current_price:.2f} → Support ${nearest_support.price:.2f} ({nearest_support.strength} touches)")
+                            confidence = 60
+                
+                if not early_prediction and nearest_resistance:
+                    distance_to_resistance = (nearest_resistance.price - current_price) / current_price
+                    if 0.01 < distance_to_resistance < 0.025:  # 1-2.5% away
+                        # Only if bearish structure
+                        if structure and any("Bearish" in s or "LH" in s or "LL" in s for s in structure):
+                            action = 'SELL'
+                            early_prediction = True
+                            reasoning.append("⚠️ NOTE: Early Prediction Signal - Approaching major resistance")
+                            reasoning.append(f"   Price ${current_price:.2f} → Resistance ${nearest_resistance.price:.2f} ({nearest_resistance.strength} touches)")
+                            confidence = 60
+            
             sl = self.calculate_structural_sl(action, entry, nearest_support, nearest_resistance, zones, channel, atr)
             tp1, tp2, tp3 = self.calculate_multi_tp(action, entry, nearest_resistance, nearest_support, channel, atr)
             tp = tp1
@@ -901,7 +949,8 @@ class HumanLikeAnalyzer:
                 visual_story=visual_story,
                 structure_labels=structure,
                 next_move=next_move,
-                visual_prediction=visual_prediction
+                visual_prediction=visual_prediction,
+                early_prediction=early_prediction
             )
         except Exception as e:
             print(f"[ERROR] generate_trade_setup: {e}")
@@ -927,7 +976,8 @@ class HumanLikeAnalyzer:
             visual_story=reason,
             structure_labels=["No data"],
             next_move="⏳ Waiting for data...",
-            visual_prediction=False
+            visual_prediction=False,
+            early_prediction=False
         )
 
 
@@ -991,7 +1041,8 @@ def analyze_like_human(df_5m: pd.DataFrame, df_15m: pd.DataFrame,
                     'risk_reward': setup_4h.risk_reward,
                     'visual_story': setup_4h.visual_story,
                     'structure': setup_4h.structure_labels,
-                    'next_move': setup_4h.next_move
+                    'next_move': setup_4h.next_move,
+                    'early_prediction': setup_4h.early_prediction
                 },
                 '1H': {
                     'action': setup_1h.action,
@@ -1008,7 +1059,8 @@ def analyze_like_human(df_5m: pd.DataFrame, df_15m: pd.DataFrame,
                     'risk_reward': setup_1h.risk_reward,
                     'visual_story': setup_1h.visual_story,
                     'structure': setup_1h.structure_labels,
-                    'next_move': setup_1h.next_move
+                    'next_move': setup_1h.next_move,
+                    'early_prediction': setup_1h.early_prediction
                 }
             },
             'recommendation': {
