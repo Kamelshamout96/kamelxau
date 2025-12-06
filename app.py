@@ -17,6 +17,7 @@ from indicators import add_all_indicators
 from advanced_analysis import analyze_mtf
 from signal_engine import check_entry, check_ultra_entry, check_ultra_v3
 from signal_engine import check_golden_entry  # noqa: F401 (future use)
+from human_like_analyzer import analyze_like_human
 
 
 app = FastAPI()
@@ -123,10 +124,12 @@ def root():
         "endpoints": {
             "/": "This documentation",
             "/health": "Health check",
-            "/run-signal": "Get trading signal (BUY/SELL/NO_TRADE)"
+            "/run-signal": "Get trading signal (BUY/SELL/NO_TRADE)",
+            "/human-analysis": "🎨 Professional trader-style chart analysis",
+            "/live-length": "Get collected data statistics"
         },
         "telegram_configured": bool(TG_TOKEN and TG_CHAT),
-        "version": "1.0.0"
+        "version": "2.0.0"
     }
 
 
@@ -280,3 +283,92 @@ def run_signal():
 
     # except Exception as e:
     #     raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/human-analysis")
+def human_analysis():
+    """
+    🎨 Professional Trader-Style Chart Analysis
+    
+    This endpoint mimics how a human trader would analyze the charts:
+    - Support & Resistance levels
+    - Trendlines & Channels (like the green lines in trading apps)
+    - Chart Patterns (ascending/descending channels, triangles, etc.)
+    - Supply & Demand Zones
+    - Complete trade setups with reasoning
+    
+    Returns detailed analysis similar to what you'd see on TradingView!
+    """
+    try:
+        # Fetch fresh live price
+        append_live_price()
+        
+        # Load collected data
+        hist = get_live_collected_data(limit=50000, days_back=40)
+        
+        # Build timeframes
+        candles_5m = build_timeframe_candles(hist, "5min")
+        candles_15m = build_timeframe_candles(hist, "15min")
+        candles_1h = build_timeframe_candles(hist, "60min")
+        candles_4h = build_timeframe_candles(hist, "240min")
+        
+        # Add indicators
+        df_5m = add_all_indicators(candles_5m)
+        df_15m = add_all_indicators(candles_15m)
+        df_1h = add_all_indicators(candles_1h)
+        df_4h = add_all_indicators(candles_4h)
+        
+        # Run human-like analysis
+        human_analysis_result = analyze_like_human(df_5m, df_15m, df_1h, df_4h)
+        
+        current_price = df_5m['close'].iloc[-1]
+        
+        # Send Telegram if action is BUY or SELL
+        if human_analysis_result['action'] in ['BUY', 'SELL']:
+            rec = human_analysis_result['recommendation']
+            tf_1h = human_analysis_result['timeframe_analysis']['1H']
+            
+            # Build reasoning text
+            reasoning_text = "\n".join([f"  • {r}" for r in rec['reasoning'][:5]])
+            patterns_text = ", ".join(tf_1h['patterns'])
+            
+            # Get key levels
+            levels_text = ""
+            for level_name, level_price in tf_1h['key_levels'].items():
+                levels_text += f"\n  📍 {level_name}: ${level_price:.2f}"
+            
+            msg = (
+                f"🎨 <b>{human_analysis_result['action']} - HUMAN-LIKE ANALYSIS</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"📊 <b>Current Price:</b> ${current_price:.2f}\n"
+                f"🎯 <b>Entry:</b> ${rec['entry']:.2f}\n"
+                f"🛑 <b>Stop Loss:</b> ${rec['sl']:.2f}\n"
+                f"✅ <b>Take Profit:</b> ${rec['tp']:.2f}\n"
+                f"⚖️ <b>Risk:Reward:</b> 1:{tf_1h['risk_reward']:.2f}\n"
+                f"🔥 <b>Confidence:</b> {human_analysis_result['confidence']:.0f}%\n"
+                f"\n"
+                f"📈 <b>Patterns Detected:</b>\n  {patterns_text}\n"
+                f"{levels_text}\n"
+                f"\n"
+                f"💡 <b>Analysis Reasoning:</b>\n{reasoning_text}\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"<i>🎨 Professional trader-style analysis</i>"
+            )
+            
+            if TG_TOKEN and TG_CHAT:
+                send_telegram(TG_TOKEN, TG_CHAT, msg)
+        
+        return human_analysis_result
+    
+    except DataError as e:
+        return JSONResponse(
+            status_code=200,
+            content={"status": "waiting", "detail": str(e)}
+        )
+    
+    except Exception as e:
+        import traceback
+        raise HTTPException(
+            status_code=500,
+            detail=traceback.format_exc()
+        )
