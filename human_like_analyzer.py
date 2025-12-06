@@ -752,6 +752,10 @@ class HumanLikeAnalyzer:
         try:
             if df is None or len(df) == 0:
                 return self._empty_setup(timeframe, "No data available")
+
+            # Respect configured lookback to stabilize runtime and signals
+            if self.lookback and len(df) > self.lookback:
+                df = df.tail(self.lookback).copy()
             
             current_price = float(df['close'].iloc[-1])
             atr = float(df['atr'].iloc[-1]) if 'atr' in df.columns else current_price * 0.01
@@ -959,6 +963,16 @@ class HumanLikeAnalyzer:
                                                      nearest_support, nearest_resistance, zones)
             next_move = self.generate_next_move(action, tp1, tp2, tp3, channel, structure, 
                                                 nearest_support, nearest_resistance)
+
+            if action == 'NO_TRADE':
+                # Zero-out execution-critical fields to avoid misleading consumers
+                sl = 0.0
+                tp = 0.0
+                tp1 = tp2 = tp3 = 0.0
+                rr = 0.0
+                confidence = 0.0
+                next_move = "\u23f3 No clear setup. Monitor for structure development."
+                visual_story = visual_story or "Awaiting structure development"
             
             if not reasoning:
                 reasoning = ["No clear setup - awaiting structure development"]
@@ -1021,11 +1035,26 @@ def analyze_like_human(df_5m: pd.DataFrame, df_15m: pd.DataFrame,
     ALWAYS returns actionable insights
     """
     try:
+        # Enforce deterministic window to avoid performance spikes and stale context
+        def _trim_df(df: pd.DataFrame, lookback: int) -> pd.DataFrame:
+            if df is None or len(df) == 0:
+                return df
+            return df.tail(lookback).copy()
+
+        df_4h = _trim_df(df_4h, 200)
+        df_1h = _trim_df(df_1h, 300)
+        df_15m = _trim_df(df_15m, 400)
+        df_5m = _trim_df(df_5m, 500)
+
         analyzer_4h = HumanLikeAnalyzer(lookback_candles=200)
         analyzer_1h = HumanLikeAnalyzer(lookback_candles=300)
+        analyzer_15m = HumanLikeAnalyzer(lookback_candles=400)
+        analyzer_5m = HumanLikeAnalyzer(lookback_candles=500)
         
         setup_4h = analyzer_4h.generate_trade_setup(df_4h, '4H')
         setup_1h = analyzer_1h.generate_trade_setup(df_1h, '1H')
+        setup_15m = analyzer_15m.generate_trade_setup(df_15m, '15m')
+        setup_5m = analyzer_5m.generate_trade_setup(df_5m, '5m')
         
         struct_bonus = 0.0
         if setup_4h.structure_labels and setup_1h.structure_labels:
@@ -1039,22 +1068,47 @@ def analyze_like_human(df_5m: pd.DataFrame, df_15m: pd.DataFrame,
             if any("channel" in p for p in setup_4h.patterns_detected) and any("channel" in p for p in setup_1h.patterns_detected):
                 pattern_bonus = 8.0
         
-        combined_conf = float(setup_4h.confidence * 0.35 + setup_1h.confidence * 0.65 + 
-                             struct_bonus + pattern_bonus)
-        
-        if setup_1h.action == setup_4h.action and setup_1h.action != 'NO_TRADE':
-            final_action = setup_1h.action
-            final_conf = combined_conf + 12.0
-        elif setup_1h.action != 'NO_TRADE':
-            final_action = setup_1h.action
-            final_conf = float(setup_1h.confidence)
-        elif setup_4h.action != 'NO_TRADE':
-            final_action = setup_4h.action
-            final_conf = float(setup_4h.confidence * 0.8)
-        else:
-            final_action = 'NO_TRADE'
+        # Blend multi-timeframe confidence, giving priority 1H > 4H > 15m > 5m
+        tf_setups = {
+            '1H': setup_1h,
+            '4H': setup_4h,
+            '15m': setup_15m,
+            '5m': setup_5m
+        }
+
+        combined_conf = float(
+            setup_4h.confidence * 0.3
+            + setup_1h.confidence * 0.4
+            + setup_15m.confidence * 0.2
+            + setup_5m.confidence * 0.1
+            + struct_bonus
+            + pattern_bonus
+        )
+
+        # Decide final action by descending priority of timeframes
+        deciding_tf = None
+        final_action = 'NO_TRADE'
+        final_conf = 0.0
+
+        for tf_name in ['1H', '4H', '15m', '5m']:
+            setup = tf_setups[tf_name]
+            if setup.action != 'NO_TRADE':
+                # If higher TF agrees with 1H add boost
+                bonus = 0.0
+                if tf_name in ('1H', '4H') and setup_1h.action == setup_4h.action and setup_1h.action != 'NO_TRADE':
+                    bonus = 12.0
+                deciding_tf = tf_name
+                final_action = setup.action
+                final_conf = float(setup.confidence + bonus)
+                break
+
+        # If still no trade, rely on blended confidence only for reference
+        if final_action == 'NO_TRADE':
             final_conf = 0.0
         
+        # Use the deciding timeframe's prices for the final recommendation
+        deciding_setup = tf_setups.get(deciding_tf or '1H')
+
         return {
             'action': final_action,
             'confidence': round(min(100.0, max(0.0, final_conf)), 1),
@@ -1074,7 +1128,7 @@ def analyze_like_human(df_5m: pd.DataFrame, df_15m: pd.DataFrame,
                     'risk_reward': setup_4h.risk_reward,
                     'visual_story': setup_4h.visual_story,
                     'structure': setup_4h.structure_labels,
-                    'next_move': setup_4h.next_move,
+                    'next_move': setup_4h.next_move if setup_4h.action != 'NO_TRADE' else "\u23f3 Monitoring market for opportunities...",
                     'early_prediction': setup_4h.early_prediction
                 },
                 '1H': {
@@ -1092,21 +1146,57 @@ def analyze_like_human(df_5m: pd.DataFrame, df_15m: pd.DataFrame,
                     'risk_reward': setup_1h.risk_reward,
                     'visual_story': setup_1h.visual_story,
                     'structure': setup_1h.structure_labels,
-                    'next_move': setup_1h.next_move,
+                    'next_move': setup_1h.next_move if setup_1h.action != 'NO_TRADE' else "\u23f3 Monitoring market for opportunities...",
                     'early_prediction': setup_1h.early_prediction
+                },
+                '15m': {
+                    'action': setup_15m.action,
+                    'confidence': round(setup_15m.confidence, 1),
+                    'entry': setup_15m.entry_price,
+                    'sl': setup_15m.sl_price,
+                    'tp': setup_15m.tp_price,
+                    'tp1': setup_15m.tp1,
+                    'tp2': setup_15m.tp2,
+                    'tp3': setup_15m.tp3,
+                    'reasoning': setup_15m.reasoning,
+                    'patterns': setup_15m.patterns_detected,
+                    'key_levels': setup_15m.key_levels,
+                    'risk_reward': setup_15m.risk_reward if setup_15m.action != 'NO_TRADE' else 0.0,
+                    'visual_story': setup_15m.visual_story,
+                    'structure': setup_15m.structure_labels,
+                    'next_move': setup_15m.next_move if setup_15m.action != 'NO_TRADE' else "\u23f3 Monitoring market for opportunities...",
+                    'early_prediction': setup_15m.early_prediction
+                },
+                '5m': {
+                    'action': setup_5m.action,
+                    'confidence': round(setup_5m.confidence, 1),
+                    'entry': setup_5m.entry_price,
+                    'sl': setup_5m.sl_price,
+                    'tp': setup_5m.tp_price,
+                    'tp1': setup_5m.tp1,
+                    'tp2': setup_5m.tp2,
+                    'tp3': setup_5m.tp3,
+                    'reasoning': setup_5m.reasoning,
+                    'patterns': setup_5m.patterns_detected,
+                    'key_levels': setup_5m.key_levels,
+                    'risk_reward': setup_5m.risk_reward if setup_5m.action != 'NO_TRADE' else 0.0,
+                    'visual_story': setup_5m.visual_story,
+                    'structure': setup_5m.structure_labels,
+                    'next_move': setup_5m.next_move if setup_5m.action != 'NO_TRADE' else "\u23f3 Monitoring market for opportunities...",
+                    'early_prediction': setup_5m.early_prediction
                 }
             },
             'recommendation': {
                 'action': final_action,
-                'entry': setup_1h.entry_price if final_action != 'NO_TRADE' else 0.0,
-                'sl': setup_1h.sl_price if final_action != 'NO_TRADE' else 0.0,
-                'tp': setup_1h.tp_price if final_action != 'NO_TRADE' else 0.0,
-                'tp1': setup_1h.tp1 if final_action != 'NO_TRADE' else 0.0,
-                'tp2': setup_1h.tp2 if final_action != 'NO_TRADE' else 0.0,
-                'tp3': setup_1h.tp3 if final_action != 'NO_TRADE' else 0.0,
-                'reasoning': setup_1h.reasoning + setup_4h.reasoning,
-                'visual_story': setup_1h.visual_story,
-                'next_move': setup_1h.next_move
+                'entry': deciding_setup.entry_price if final_action != 'NO_TRADE' else 0.0,
+                'sl': deciding_setup.sl_price if final_action != 'NO_TRADE' else 0.0,
+                'tp': deciding_setup.tp_price if final_action != 'NO_TRADE' else 0.0,
+                'tp1': deciding_setup.tp1 if final_action != 'NO_TRADE' else 0.0,
+                'tp2': deciding_setup.tp2 if final_action != 'NO_TRADE' else 0.0,
+                'tp3': deciding_setup.tp3 if final_action != 'NO_TRADE' else 0.0,
+                'reasoning': deciding_setup.reasoning + setup_4h.reasoning,
+                'visual_story': deciding_setup.visual_story,
+                'next_move': deciding_setup.next_move
             }
         }
     except Exception as e:
