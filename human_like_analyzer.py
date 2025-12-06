@@ -125,30 +125,39 @@ class HumanLikeAnalyzer:
             return swings
         
         try:
-            for i in range(window, len(df) - window):
-                high = df['high'].iloc[i]
-                
-                is_swing_high = all(df['high'].iloc[j] < high for j in range(i - window, i + window + 1) if j != i)
-                
-                if is_swing_high:
+            highs = df['high'].values
+            lows = df['low'].values
+            times = df.index
+            n = len(df)
+            
+            # Detect swing highs using array slices (avoids repeated pandas access)
+            for i in range(window, n - window):
+                high = highs[i]
+                left_slice = highs[i - window:i]
+                right_slice = highs[i + 1:i + window + 1]
+                if len(left_slice) == 0 or len(right_slice) == 0:
+                    continue
+                if high > np.max(left_slice) and high > np.max(right_slice):
                     strength = self._calculate_swing_strength(df, i, 'high', window)
                     swings.append(SwingPoint(
                         price=float(high),
-                        time=df.index[i],
+                        time=times[i],
                         swing_type='high',
                         strength=strength
                     ))
             
-            for i in range(window, len(df) - window):
-                low = df['low'].iloc[i]
-                
-                is_swing_low = all(df['low'].iloc[j] > low for j in range(i - window, i + window + 1) if j != i)
-                
-                if is_swing_low:
+            # Detect swing lows using array slices
+            for i in range(window, n - window):
+                low = lows[i]
+                left_slice = lows[i - window:i]
+                right_slice = lows[i + 1:i + window + 1]
+                if len(left_slice) == 0 or len(right_slice) == 0:
+                    continue
+                if low < np.min(left_slice) and low < np.min(right_slice):
                     strength = self._calculate_swing_strength(df, i, 'low', window)
                     swings.append(SwingPoint(
                         price=float(low),
-                        time=df.index[i],
+                        time=times[i],
                         swing_type='low',
                         strength=strength
                     ))
@@ -426,18 +435,21 @@ class HumanLikeAnalyzer:
         
         try:
             tolerance = abs(start_price * 0.0025)
-            df_subset = df[df.index >= start_time]
-            
-            for idx, row in df_subset.iterrows():
-                time_diff = (idx - start_time).total_seconds()
-                expected_price = start_price + (slope * time_diff)
-                
-                if line_type == 'support_trend':
-                    if abs(float(row['low']) - expected_price) < tolerance:
-                        touches += 1
-                else:
-                    if abs(float(row['high']) - expected_price) < tolerance:
-                        touches += 1
+            mask = df.index >= start_time
+            if not mask.any():
+                return touches
+
+            times = df.index[mask]
+            time_deltas = np.array([(t - start_time).total_seconds() for t in times])
+            expected_prices = start_price + (slope * time_deltas)
+
+            if line_type == 'support_trend':
+                actual = df['low'].to_numpy()[mask]
+            else:
+                actual = df['high'].to_numpy()[mask]
+
+            diff = np.abs(actual.astype(float) - expected_prices)
+            touches = int(np.sum(diff < tolerance))
         except Exception as e:
             print(f"[WARN] _count_trendline_touches: {e}")
         

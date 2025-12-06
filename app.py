@@ -323,69 +323,76 @@ def human_analysis():
         
         current_price = df_5m['close'].iloc[-1]
         
-        # Send Telegram if action is BUY or SELL
+        # Send Telegram per timeframe if action is BUY or SELL
         if human_analysis_result['action'] in ['BUY', 'SELL']:
-            rec = human_analysis_result['recommendation']
-            tf_1h = human_analysis_result['timeframe_analysis']['1H']
-            normalized = normalize_signal(
-                {
-                    "action": human_analysis_result.get("action"),
-                    "timeframe": "1H-HUMAN",
-                    "entry": rec.get("entry"),
-                    "sl": rec.get("sl"),
-                    "tp": rec.get("tp"),
-                    "market_status": "HUMAN",
-                }
-            )
-            
-            # Build reasoning text
-            reasoning_text = "\n".join([f"  • {r}" for r in rec['reasoning'][:5]])
-            patterns_text = ", ".join(tf_1h['patterns'])
-            
-            # Get key levels
-            levels_text = ""
-            for level_name, level_price in tf_1h['key_levels'].items():
-                levels_text += f"\n  📍 {level_name}: ${level_price:.2f}"
+            tf_map = human_analysis_result['timeframe_analysis']
+            tf_order = ['1H', '15m', '5m']
 
-            tp_lines = ""
-            for idx, key in enumerate(["tp1", "tp2", "tp3"], start=1):
-                val = rec.get(key)
-                if val is not None:
-                    tp_lines += f"✅ <b>TP{idx}:</b> ${val:.2f}\n"
-            if not tp_lines:
-                tp_lines = f"✅ <b>Take Profit:</b> ${rec['tp']:.2f}\n"
+            def _build_msg(tf_name: str, tf_data: dict, rec: dict, overall_conf: float) -> str:
+                reasoning_text = "\n".join([f"  • {r}" for r in rec.get('reasoning', [])[:5]])
+                patterns_text = ", ".join(tf_data.get('patterns', []))
 
-            # Check if early prediction
-            early_note = ""
-            if tf_1h.get('early_prediction', False):
-                early_note = "⚠️ <b>NOTE: EARLY PREDICTION SIGNAL</b>\n"
+                levels_text = ""
+                for level_name, level_price in tf_data.get('key_levels', {}).items():
+                    levels_text += f"\n  📍 {level_name}: ${level_price:.2f}"
 
-            msg = (
-                f"🎨 <b>{human_analysis_result['action']} - ANALYSIS</b>\n"
-                f"━━━━━━━━━━━━━━━━━━━━\n"
-                f"{early_note}"
-                f"📊 <b>Current Price:</b> ${current_price:.2f}\n"
-                f"🎯 <b>Entry:</b> ${rec['entry']:.2f}\n"
-                f"🛑 <b>Stop Loss:</b> ${rec['sl']:.2f}\n"
-                f"{tp_lines}"
-                f"⚖️ <b>Risk:Reward:</b> 1:{tf_1h['risk_reward']:.2f}\n"
-                f"🔥 <b>Confidence:</b> {human_analysis_result['confidence']:.0f}%\n"
-                f"\n"
-                f"📈 <b>Patterns Detected:</b>\n  {patterns_text}\n"
-                f"{levels_text}\n"
-                f"\n"
-                f"💡 <b>Analysis Reasoning:</b>\n{reasoning_text}\n"
-            )
-            
+                tp_lines = ""
+                for idx, key in enumerate(["tp1", "tp2", "tp3"], start=1):
+                    val = rec.get(key)
+                    if val is not None:
+                        tp_lines += f"✅ TP{idx}: ${val:.2f}\n"
+                if not tp_lines and rec.get('tp') is not None:
+                    tp_lines = f"🎯 Take Profit: ${rec['tp']:.2f}\n"
+
+                early_note = ""
+                if tf_data.get('early_prediction', False):
+                    early_note = "⚠️ NOTE: EARLY PREDICTION SIGNAL\n"
+
+                return (
+                    f"🎨 <b>{human_analysis_result['action']} - ANALYSIS {tf_name}</b>\n"
+                    f"━━━━━━━━━━━━\n"
+                    f"{early_note}"
+                    f"📊 Current Price: ${current_price:.2f}\n"
+                    f"🎯 Entry: ${rec.get('entry', 0):.2f}\n"
+                    f"🛑 Stop Loss: ${rec.get('sl', 0):.2f}\n"
+                    f"{tp_lines}"
+                    f"⚖️ Risk:Reward: 1:{tf_data.get('risk_reward', 0.0):.2f}\n"
+                    f"🔥 Confidence: {overall_conf:.0f}%\n"
+                    f"\n"
+                    f"📈 Patterns Detected:\n  {patterns_text}\n"
+                    f"{levels_text}\n"
+                    f"\n"
+                    f"💡 Analysis Reasoning:\n{reasoning_text}\n"
+                )
+
             if TG_TOKEN and TG_CHAT:
                 last_signal = _load_last_signal()
-                already_sent = is_duplicate_signal(normalized, last_signal)
-                if not already_sent:
-                    send_telegram(TG_TOKEN, TG_CHAT, msg)
-                    _save_last_signal(normalized)
-                else:
-                    print("[info] human analysis signal already sent, skipping telegram")
-        
+                for tf_name in tf_order:
+                    tf_data = tf_map.get(tf_name)
+                    if not tf_data or tf_data.get('action') != human_analysis_result['action']:
+                        continue
+
+                    rec = human_analysis_result['recommendation'] if tf_name == '1H' else tf_data
+                    normalized = normalize_signal(
+                        {
+                            "action": tf_data.get("action"),
+                            "timeframe": f"{tf_name}-HUMAN",
+                            "entry": rec.get("entry"),
+                            "sl": rec.get("sl"),
+                            "tp": rec.get("tp"),
+                            "market_status": "HUMAN",
+                        }
+                    )
+
+                    msg = _build_msg(tf_name, tf_data, rec, human_analysis_result['confidence'])
+                    already_sent = is_duplicate_signal(normalized, last_signal)
+                    if not already_sent:
+                        send_telegram(TG_TOKEN, TG_CHAT, msg)
+                        _save_last_signal(normalized)
+                        last_signal = normalized
+                    else:
+                        print(f"[info] human analysis signal already sent for {tf_name}, skipping telegram")
+
         return human_analysis_result
     
     except DataError as e:
