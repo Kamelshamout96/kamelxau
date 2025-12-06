@@ -328,7 +328,7 @@ def human_analysis():
             tf_map = human_analysis_result['timeframe_analysis']
             tf_order = ['1H', '15m', '5m']
 
-            def _build_msg(tf_name: str, tf_data: dict, rec: dict, overall_conf: float) -> str:
+            def _build_msg(tf_name: str, tf_data: dict, rec: dict, tf_conf: float) -> str:
                 reasoning_text = "\n".join([f"  • {r}" for r in rec.get('reasoning', [])[:5]])
                 patterns_text = ", ".join(tf_data.get('patterns', []))
 
@@ -357,7 +357,7 @@ def human_analysis():
                     f"🛑 Stop Loss: ${rec.get('sl', 0):.2f}\n"
                     f"{tp_lines}"
                     f"⚖️ Risk:Reward: 1:{tf_data.get('risk_reward', 0.0):.2f}\n"
-                    f"🔥 Confidence: {overall_conf:.0f}%\n"
+                    f"🔥 Confidence: {tf_conf:.0f}%\n"
                     f"\n"
                     f"📈 Patterns Detected:\n  {patterns_text}\n"
                     f"{levels_text}\n"
@@ -384,7 +384,8 @@ def human_analysis():
                         }
                     )
 
-                    msg = _build_msg(tf_name, tf_data, rec, human_analysis_result['confidence'])
+                    tf_conf = tf_data.get("confidence", human_analysis_result.get("confidence", 0.0))
+                    msg = _build_msg(tf_name, tf_data, rec, tf_conf)
                     already_sent = is_duplicate_signal(normalized, last_signal)
                     if not already_sent:
                         send_telegram(TG_TOKEN, TG_CHAT, msg)
