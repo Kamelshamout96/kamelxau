@@ -369,7 +369,6 @@ def human_analysis():
                 f"{levels_text}\n"
                 f"\n"
                 f"💡 <b>Analysis Reasoning:</b>\n{reasoning_text}\n"
-                f"━━━━━━━━━━━━━━━━━━━━\n"
             )
             
             if TG_TOKEN and TG_CHAT:
