@@ -31,6 +31,7 @@ _collector_thread = None
 DATA_DIR = Path("data")
 DATA_DIR.mkdir(exist_ok=True)
 LAST_SIGNAL_FILE = DATA_DIR / "last_signal.json"
+LAST_HUMAN_SIGNAL_FILE = DATA_DIR / "last_signal_human.json"
 
 
 def normalize_signal(signal: dict) -> dict:
@@ -85,6 +86,30 @@ def _save_last_signal(signal: dict):
             json.dump(signal, f)
     except Exception as e:
         print(f"[warn] failed to persist last signal: {e}")
+
+
+def _load_last_human_signals() -> dict:
+    if not LAST_HUMAN_SIGNAL_FILE.exists():
+        return {}
+    try:
+        with LAST_HUMAN_SIGNAL_FILE.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+            if isinstance(data, dict):
+                return data
+            return {}
+    except Exception as e:
+        print(f"[warn] failed to read last human signals: {e}")
+        return {}
+
+
+def _save_last_human_signal(tf_name: str, signal: dict):
+    try:
+        data = _load_last_human_signals()
+        data[tf_name] = signal
+        with LAST_HUMAN_SIGNAL_FILE.open("w", encoding="utf-8") as f:
+            json.dump(data, f)
+    except Exception as e:
+        print(f"[warn] failed to persist last human signal: {e}")
 
 
 def _collector_loop():
@@ -366,7 +391,7 @@ def human_analysis():
                 )
 
             if TG_TOKEN and TG_CHAT:
-                last_signal = _load_last_signal()
+                last_human = _load_last_human_signals()
                 for tf_name in tf_order:
                     tf_data = tf_map.get(tf_name)
                     if not tf_data or tf_data.get('action') != human_analysis_result['action']:
@@ -386,11 +411,11 @@ def human_analysis():
 
                     tf_conf = tf_data.get("confidence", human_analysis_result.get("confidence", 0.0))
                     msg = _build_msg(tf_name, tf_data, rec, tf_conf)
-                    already_sent = is_duplicate_signal(normalized, last_signal)
+                    already_sent = is_duplicate_signal(normalized, last_human.get(tf_name, {}))
                     if not already_sent:
                         send_telegram(TG_TOKEN, TG_CHAT, msg)
-                        _save_last_signal(normalized)
-                        last_signal = normalized
+                        _save_last_human_signal(tf_name, normalized)
+                        last_human[tf_name] = normalized
                     else:
                         print(f"[info] human analysis signal already sent for {tf_name}, skipping telegram")
 
