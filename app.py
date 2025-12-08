@@ -32,6 +32,7 @@ DATA_DIR = Path("data")
 DATA_DIR.mkdir(exist_ok=True)
 LAST_SIGNAL_FILE = DATA_DIR / "last_signal.json"
 LAST_HUMAN_SIGNAL_FILE = DATA_DIR / "last_signal_human.json"
+last_entry_price = None
 
 
 def normalize_signal(signal: dict) -> dict:
@@ -195,6 +196,7 @@ def live_length():
 @app.get("/run-signal")
 def run_signal():
     try:
+        global last_entry_price
         # Always fetch a fresh live price first
         append_live_price()
 
@@ -251,6 +253,11 @@ def run_signal():
 
         # Send Telegram if a trade exists
         if signal.get("action") in ("BUY", "SELL"):
+            entry = float(signal.get("entry", 0))
+            if last_entry_price is not None and abs(entry - last_entry_price) < 2:
+                return {"status": "skipped", "reason": "entry too close to previous"}
+            last_entry_price = entry
+
             confidence = signal.get("confidence", "UNKNOWN")
             confidence_emoji = signal.get("confidence_emoji", "")
             signal_type = signal.get("signal_type", "REGULAR")
