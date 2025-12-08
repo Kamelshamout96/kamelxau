@@ -1665,3 +1665,70 @@ def analyze_like_human(df_5m: pd.DataFrame, df_15m: pd.DataFrame,
                 'next_move': '⏳ Please check system logs'
             }
         }
+
+
+# Post-processing validator to enforce direction-consistent SL/TP
+def validate_and_correct_signal(signal: dict) -> dict:
+    if not isinstance(signal, dict):
+        return signal
+
+    def _to_float(val):
+        try:
+            return float(val)
+        except Exception:
+            return None
+
+    def _fix_payload(payload: dict, enforced_action: str | None = None):
+        if not isinstance(payload, dict):
+            return payload
+        p = dict(payload)
+        action = (enforced_action or p.get('action') or '').upper()
+        entry = _to_float(p.get('entry')) or _to_float(p.get('entry_price'))
+        sl = _to_float(p.get('sl')) or _to_float(p.get('sl_price'))
+        tp_keys = ['tp','tp1','tp2','tp3','tp4','tp_price']
+        tp_vals = {k: _to_float(p.get(k)) for k in tp_keys if k in p}
+        if entry is None or action not in ('BUY','SELL'):
+            return p
+        sl_dist = abs(entry - sl) if sl is not None else None
+        tp_dists = {k: (abs(entry - v) if v is not None else None) for k,v in tp_vals.items()}
+        def _apply_buy():
+            if sl_dist is not None:
+                p['sl'] = entry - sl_dist
+            for k, dist in tp_dists.items():
+                if dist is not None:
+                    p[k] = entry + dist
+        def _apply_sell():
+            if sl_dist is not None:
+                p['sl'] = entry + sl_dist
+            for k, dist in tp_dists.items():
+                if dist is not None:
+                    p[k] = entry - dist
+        if action == 'BUY':
+            _apply_buy()
+            if p.get('sl') is not None and p['sl'] >= entry:
+                _apply_buy()
+        elif action == 'SELL':
+            _apply_sell()
+            if p.get('sl') is not None and p['sl'] <= entry:
+                _apply_sell()
+        p['action'] = action
+        return p
+
+    fixed = dict(signal)
+    tf_map = fixed.get('timeframe_analysis')
+    if isinstance(tf_map, dict):
+        for tf_name, payload in tf_map.items():
+            tf_action = payload.get('action') if isinstance(payload, dict) else None
+            tf_action = (tf_action or fixed.get('action') or '').upper()
+            tf_map[tf_name] = _fix_payload(payload, tf_action)
+        fixed['timeframe_analysis'] = tf_map
+
+    rec = fixed.get('recommendation', {})
+    rec_action = (rec.get('action') if isinstance(rec, dict) else None) or fixed.get('action')
+    fixed['recommendation'] = _fix_payload(rec, rec_action)
+    if isinstance(fixed.get('recommendation'), dict):
+        act = fixed['recommendation'].get('action')
+        if act in ('BUY','SELL'):
+            fixed['action'] = act
+    return fixed
+
