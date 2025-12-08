@@ -371,6 +371,7 @@ def _human_struct_scalp(df_5m, df_15m, df_1h, adx5=None, adx15=None):
         "action": direction,
         "entry": round(price, 2),
         "sl": round(sl, 2),
+        "tp": round(tp1, 2),
         "tp1": round(tp1, 2),
         "tp2": round(tp2, 2),
         "tp3": round(tp3, 2),
