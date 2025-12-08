@@ -358,33 +358,37 @@ def human_analysis():
             human_analysis.last_result = None
 
         signal = human_analysis_result
-        current = {
-            "entry": float(signal["entry"]),
-            "sl": float(signal["sl"]),
-            "tp1": float(signal["tp1"]),
-            "tp2": float(signal["tp2"]),
-            "tp3": float(signal["tp3"]),
-            "action": signal["action"]
-        }
+        try:
+            current = {
+                "entry": float(signal.get("entry", 0)),
+                "sl": float(signal.get("sl", 0)),
+                "tp1": float(signal.get("tp1", 0)),
+                "tp2": float(signal.get("tp2", 0)),
+                "tp3": float(signal.get("tp3", 0)),
+                "action": signal["action"]
+            }
+        except Exception:
+            current = None
 
-        last = human_analysis.last_result
-        if last:
-            same_action = current["action"] == last["action"]
-            entry_close = abs(current["entry"] - last["entry"]) < 2
-            same_sl = current["sl"] == last["sl"]
-            same_tps = (
-                current["tp1"] == last["tp1"]
-                and current["tp2"] == last["tp2"]
-                and current["tp3"] == last["tp3"]
-            )
-            if same_action and entry_close and same_sl and same_tps:
-                return {
-                    "success": False,
-                    "reason": "duplicate_filtered",
-                    "entry": current["entry"]
-                }
+        if current:
+            last = human_analysis.last_result
+            if last:
+                same_action = current["action"] == last["action"]
+                entry_close = abs(current["entry"] - last["entry"]) < 2
+                same_sl = current["sl"] == last["sl"]
+                same_tps = (
+                    current["tp1"] == last["tp1"]
+                    and current["tp2"] == last["tp2"]
+                    and current["tp3"] == last["tp3"]
+                )
+                if same_action and entry_close and same_sl and same_tps:
+                    return {
+                        "success": False,
+                        "reason": "duplicate_filtered",
+                        "entry": current["entry"]
+                    }
 
-        human_analysis.last_result = current
+            human_analysis.last_result = current
         
         # Send Telegram per timeframe if action is BUY or SELL
         if human_analysis_result['action'] in ['BUY', 'SELL']:
