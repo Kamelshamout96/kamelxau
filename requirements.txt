@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+pandas
+ta
+requests
+yfinance
+beautifulsoup4
+gspread
+google-auth
+google-cloud-firestore
