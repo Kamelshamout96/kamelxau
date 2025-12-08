@@ -1359,6 +1359,21 @@ def analyze_like_human(df_5m: pd.DataFrame, df_15m: pd.DataFrame,
                     return tf_name
             return fallback
 
+        # --- HTF master direction gate (4H & 1H must agree; 15m cannot contradict) ---
+        master_action = 'NO_TRADE'
+        if setup_4h.action == setup_1h.action and setup_4h.action in ('BUY', 'SELL'):
+            if setup_15m.action in (setup_4h.action, 'NO_TRADE'):
+                master_action = setup_4h.action
+
+        if master_action == 'NO_TRADE':
+            final_action = 'NO_TRADE'
+            final_conf = 0.0
+            deciding_tf = '1H'
+        else:
+            final_action = master_action
+            deciding_tf = _pick_tf_for_action(master_action, '1H')
+            final_conf = final_conf if final_conf > 0 else combined_conf
+
         # SMC unified gating
         trend_confluence_buy = smc_ctx['4H']['trend'] == 'bullish' and smc_ctx['1H']['trend'] == 'bullish'
         trend_confluence_sell = smc_ctx['4H']['trend'] == 'bearish' and smc_ctx['1H']['trend'] == 'bearish'
@@ -1423,9 +1438,13 @@ def analyze_like_human(df_5m: pd.DataFrame, df_15m: pd.DataFrame,
         if smc_action == 'NO_TRADE':
             final_action = 'NO_TRADE'
         else:
-            final_action = smc_action
-            if final_conf == 0.0:
-                final_conf = combined_conf
+            # 5m cannot override HTF; enforce master gate
+            if master_action == 'NO_TRADE':
+                final_action = 'NO_TRADE'
+            else:
+                final_action = master_action
+                if final_conf == 0.0:
+                    final_conf = combined_conf
 
         deciding_tf = _pick_tf_for_action(final_action, deciding_tf or '1H')
         deciding_setup = tf_setups.get(deciding_tf or '1H')
@@ -1463,6 +1482,59 @@ def analyze_like_human(df_5m: pd.DataFrame, df_15m: pd.DataFrame,
         else:
             deciding_setup = tf_setups.get(deciding_tf or '1H')
 
+        # --- SL/TP orientation fixer (preserve distances, align with direction) ---
+        def _fix_orientation(payload: Dict, direction: str) -> Dict:
+            if not isinstance(payload, dict):
+                return payload
+            if direction not in ('BUY', 'SELL'):
+                direction = str(payload.get('action', '')).upper()
+            p = dict(payload)
+
+            def _to_float(val):
+                try:
+                    return float(val)
+                except Exception:
+                    return None
+
+            entry = _to_float(p.get('entry')) or _to_float(p.get('entry_price'))
+            sl = _to_float(p.get('sl')) or _to_float(p.get('sl_price'))
+            tp_keys = ['tp', 'tp1', 'tp2', 'tp3', 'tp4', 'tp_price']
+            tp_vals = {k: _to_float(p.get(k)) for k in tp_keys if k in p}
+
+            if entry is None:
+                return p
+
+            sl_dist = abs(entry - sl) if sl is not None else None
+            tp_dists = {k: (abs(entry - v) if v is not None else None) for k, v in tp_vals.items()}
+
+            def _apply_buy():
+                if sl_dist is not None:
+                    p['sl'] = entry - sl_dist
+                for k, dist in tp_dists.items():
+                    if dist is not None:
+                        p[k] = entry + dist
+
+            def _apply_sell():
+                if sl_dist is not None:
+                    p['sl'] = entry + sl_dist
+                for k, dist in tp_dists.items():
+                    if dist is not None:
+                        p[k] = entry - dist
+
+            if direction == 'BUY':
+                _apply_buy()
+            elif direction == 'SELL':
+                _apply_sell()
+
+            # Final guard
+            if direction == 'BUY' and p.get('sl') is not None and p['sl'] >= entry:
+                _apply_buy()
+            if direction == 'SELL' and p.get('sl') is not None and p['sl'] <= entry:
+                _apply_sell()
+
+            p['action'] = direction
+            return p
+
         merged_reasoning = deciding_setup.reasoning + setup_4h.reasoning
         if smc_notes:
             merged_reasoning = merged_reasoning + smc_notes
@@ -1475,95 +1547,105 @@ def analyze_like_human(df_5m: pd.DataFrame, df_15m: pd.DataFrame,
                     seen.add(item)
             merged_reasoning = deduped
 
+        tf_payload_4h = _fix_orientation({
+            'action': master_action if master_action != 'NO_TRADE' else setup_4h.action,
+            'confidence': round(setup_4h.confidence, 1),
+            'entry': setup_4h.entry_price,
+            'sl': setup_4h.sl_price,
+            'tp': setup_4h.tp_price,
+            'tp1': setup_4h.tp1,
+            'tp2': setup_4h.tp2,
+            'tp3': setup_4h.tp3,
+            'reasoning': setup_4h.reasoning,
+            'patterns': setup_4h.patterns_detected,
+            'key_levels': setup_4h.key_levels,
+            'risk_reward': setup_4h.risk_reward,
+            'visual_story': setup_4h.visual_story,
+            'structure': setup_4h.structure_labels,
+            'next_move': setup_4h.next_move if setup_4h.action != 'NO_TRADE' else "\u23f3 Monitoring market for opportunities...",
+            'early_prediction': setup_4h.early_prediction
+        }, master_action if master_action != 'NO_TRADE' else setup_4h.action)
+
+        tf_payload_1h = _fix_orientation({
+            'action': master_action if master_action != 'NO_TRADE' else setup_1h.action,
+            'confidence': round(setup_1h.confidence, 1),
+            'entry': setup_1h.entry_price,
+            'sl': setup_1h.sl_price,
+            'tp': setup_1h.tp_price,
+            'tp1': setup_1h.tp1,
+            'tp2': setup_1h.tp2,
+            'tp3': setup_1h.tp3,
+            'reasoning': setup_1h.reasoning,
+            'patterns': setup_1h.patterns_detected,
+            'key_levels': setup_1h.key_levels,
+            'risk_reward': setup_1h.risk_reward,
+            'visual_story': setup_1h.visual_story,
+            'structure': setup_1h.structure_labels,
+            'next_move': setup_1h.next_move if setup_1h.action != 'NO_TRADE' else "\u23f3 Monitoring market for opportunities...",
+            'early_prediction': setup_1h.early_prediction
+        }, master_action if master_action != 'NO_TRADE' else setup_1h.action)
+
+        tf_payload_15m = _fix_orientation({
+            'action': setup_15m.action,
+            'confidence': round(setup_15m.confidence, 1),
+            'entry': setup_15m.entry_price,
+            'sl': setup_15m.sl_price,
+            'tp': setup_15m.tp_price,
+            'tp1': setup_15m.tp1,
+            'tp2': setup_15m.tp2,
+            'tp3': setup_15m.tp3,
+            'reasoning': setup_15m.reasoning,
+            'patterns': setup_15m.patterns_detected,
+            'key_levels': setup_15m.key_levels,
+            'risk_reward': setup_15m.risk_reward if setup_15m.action != 'NO_TRADE' else 0.0,
+            'visual_story': setup_15m.visual_story,
+            'structure': setup_15m.structure_labels,
+            'next_move': setup_15m.next_move if setup_15m.action != 'NO_TRADE' else "\u23f3 Monitoring market for opportunities...",
+            'early_prediction': setup_15m.early_prediction
+        }, master_action if master_action != 'NO_TRADE' else setup_15m.action)
+
+        tf_payload_5m = _fix_orientation({
+            'action': master_action if master_action != 'NO_TRADE' else setup_5m.action,
+            'confidence': round(setup_5m.confidence, 1),
+            'entry': setup_5m.entry_price,
+            'sl': setup_5m.sl_price,
+            'tp': setup_5m.tp_price,
+            'tp1': setup_5m.tp1,
+            'tp2': setup_5m.tp2,
+            'tp3': setup_5m.tp3,
+            'reasoning': setup_5m.reasoning,
+            'patterns': setup_5m.patterns_detected,
+            'key_levels': setup_5m.key_levels,
+            'risk_reward': setup_5m.risk_reward if setup_5m.action != 'NO_TRADE' else 0.0,
+            'visual_story': setup_5m.visual_story,
+            'structure': setup_5m.structure_labels,
+            'next_move': setup_5m.next_move if setup_5m.action != 'NO_TRADE' else "\u23f3 Monitoring market for opportunities...",
+            'early_prediction': setup_5m.early_prediction
+        }, master_action if master_action != 'NO_TRADE' else setup_5m.action)
+
+        rec_payload = _fix_orientation({
+            'action': final_action,
+            'entry': deciding_setup.entry_price if final_action != 'NO_TRADE' else 0.0,
+            'sl': deciding_setup.sl_price if final_action != 'NO_TRADE' else 0.0,
+            'tp': deciding_setup.tp_price if final_action != 'NO_TRADE' else 0.0,
+            'tp1': deciding_setup.tp1 if final_action != 'NO_TRADE' else 0.0,
+            'tp2': deciding_setup.tp2 if final_action != 'NO_TRADE' else 0.0,
+            'tp3': deciding_setup.tp3 if final_action != 'NO_TRADE' else 0.0,
+            'reasoning': merged_reasoning,
+            'visual_story': deciding_setup.visual_story,
+            'next_move': deciding_setup.next_move
+        }, final_action)
+
         return {
             'action': final_action,
             'confidence': final_conf,
             'timeframe_analysis': {
-                '4H': {
-                    'action': setup_4h.action,
-                    'confidence': round(setup_4h.confidence, 1),
-                    'entry': setup_4h.entry_price,
-                    'sl': setup_4h.sl_price,
-                    'tp': setup_4h.tp_price,
-                    'tp1': setup_4h.tp1,
-                    'tp2': setup_4h.tp2,
-                    'tp3': setup_4h.tp3,
-                    'reasoning': setup_4h.reasoning,
-                    'patterns': setup_4h.patterns_detected,
-                    'key_levels': setup_4h.key_levels,
-                    'risk_reward': setup_4h.risk_reward,
-                    'visual_story': setup_4h.visual_story,
-                    'structure': setup_4h.structure_labels,
-                    'next_move': setup_4h.next_move if setup_4h.action != 'NO_TRADE' else "\u23f3 Monitoring market for opportunities...",
-                    'early_prediction': setup_4h.early_prediction
-                },
-                '1H': {
-                    'action': setup_1h.action,
-                    'confidence': round(setup_1h.confidence, 1),
-                    'entry': setup_1h.entry_price,
-                    'sl': setup_1h.sl_price,
-                    'tp': setup_1h.tp_price,
-                    'tp1': setup_1h.tp1,
-                    'tp2': setup_1h.tp2,
-                    'tp3': setup_1h.tp3,
-                    'reasoning': setup_1h.reasoning,
-                    'patterns': setup_1h.patterns_detected,
-                    'key_levels': setup_1h.key_levels,
-                    'risk_reward': setup_1h.risk_reward,
-                    'visual_story': setup_1h.visual_story,
-                    'structure': setup_1h.structure_labels,
-                    'next_move': setup_1h.next_move if setup_1h.action != 'NO_TRADE' else "\u23f3 Monitoring market for opportunities...",
-                    'early_prediction': setup_1h.early_prediction
-                },
-                '15m': {
-                    'action': setup_15m.action,
-                    'confidence': round(setup_15m.confidence, 1),
-                    'entry': setup_15m.entry_price,
-                    'sl': setup_15m.sl_price,
-                    'tp': setup_15m.tp_price,
-                    'tp1': setup_15m.tp1,
-                    'tp2': setup_15m.tp2,
-                    'tp3': setup_15m.tp3,
-                    'reasoning': setup_15m.reasoning,
-                    'patterns': setup_15m.patterns_detected,
-                    'key_levels': setup_15m.key_levels,
-                    'risk_reward': setup_15m.risk_reward if setup_15m.action != 'NO_TRADE' else 0.0,
-                    'visual_story': setup_15m.visual_story,
-                    'structure': setup_15m.structure_labels,
-                    'next_move': setup_15m.next_move if setup_15m.action != 'NO_TRADE' else "\u23f3 Monitoring market for opportunities...",
-                    'early_prediction': setup_15m.early_prediction
-                },
-                '5m': {
-                    'action': setup_5m.action,
-                    'confidence': round(setup_5m.confidence, 1),
-                    'entry': setup_5m.entry_price,
-                    'sl': setup_5m.sl_price,
-                    'tp': setup_5m.tp_price,
-                    'tp1': setup_5m.tp1,
-                    'tp2': setup_5m.tp2,
-                    'tp3': setup_5m.tp3,
-                    'reasoning': setup_5m.reasoning,
-                    'patterns': setup_5m.patterns_detected,
-                    'key_levels': setup_5m.key_levels,
-                    'risk_reward': setup_5m.risk_reward if setup_5m.action != 'NO_TRADE' else 0.0,
-                    'visual_story': setup_5m.visual_story,
-                    'structure': setup_5m.structure_labels,
-                    'next_move': setup_5m.next_move if setup_5m.action != 'NO_TRADE' else "\u23f3 Monitoring market for opportunities...",
-                    'early_prediction': setup_5m.early_prediction
-                }
+                '4H': tf_payload_4h,
+                '1H': tf_payload_1h,
+                '15m': tf_payload_15m,
+                '5m': tf_payload_5m
             },
-            'recommendation': {
-                'action': final_action,
-                'entry': deciding_setup.entry_price if final_action != 'NO_TRADE' else 0.0,
-                'sl': deciding_setup.sl_price if final_action != 'NO_TRADE' else 0.0,
-                'tp': deciding_setup.tp_price if final_action != 'NO_TRADE' else 0.0,
-                'tp1': deciding_setup.tp1 if final_action != 'NO_TRADE' else 0.0,
-                'tp2': deciding_setup.tp2 if final_action != 'NO_TRADE' else 0.0,
-                'tp3': deciding_setup.tp3 if final_action != 'NO_TRADE' else 0.0,
-                'reasoning': merged_reasoning,
-                'visual_story': deciding_setup.visual_story,
-                'next_move': deciding_setup.next_move
-            }
+            'recommendation': rec_payload
         }
     except Exception as e:
         print(f"[ERROR] analyze_like_human: {e}")

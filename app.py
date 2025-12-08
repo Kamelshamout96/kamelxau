@@ -23,7 +23,7 @@ from indicators import add_all_indicators
 from advanced_analysis import analyze_mtf
 from signal_engine import check_entry, check_ultra_entry, check_ultra_v3
 from signal_engine import check_golden_entry  # noqa: F401 (future use)
-from human_like_analyzer import analyze_like_human
+from human_like_analyzer import analyze_like_human, validate_and_correct_signal
 
 
 app = FastAPI()
@@ -363,6 +363,7 @@ def human_analysis():
         
         # Run human-like analysis
         human_analysis_result = analyze_like_human(df_5m, df_15m, df_1h, df_4h)
+        human_analysis_result = validate_and_correct_signal(human_analysis_result)
         human_recommendation = human_analysis_result.get("recommendation", {})
         human_analysis_result["recommendation"] = validate_direction_consistency(human_recommendation)
 
