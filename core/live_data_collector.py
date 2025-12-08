@@ -1,3 +1,5 @@
+import json
+import os
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -8,12 +10,64 @@ import pandas as pd
 
 from core.utils import DataError, get_live_gold_price_usa, isMarketOpen
 
+try:
+    import gspread
+    from google.oauth2.service_account import Credentials
+except Exception:  # pragma: no cover - optional dependency
+    gspread = None
+    Credentials = None
+
 DATA_DIR = Path("data")
 DATA_DIR.mkdir(exist_ok=True)
 
 LIVE_DATA_FILE = DATA_DIR / "live_1m.csv"
 CACHE_TTL_SECONDS = 60
 _cache = {"ts": 0.0, "df": None}
+
+# Google Sheets configuration (optional)
+SHEETS_ID = os.getenv("GOOGLE_SHEETS_ID") or os.getenv("GOOGLE_SHEET_ID")
+GOOGLE_CREDS_JSON = os.getenv("GOOGLE_CREDENTIALS_JSON")
+GOOGLE_CREDS_FILE = os.getenv("GOOGLE_CREDENTIALS_FILE") or os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+WORKSHEET_NAME = os.getenv("GOOGLE_SHEETS_WORKSHEET", "live_candles")
+_sheet = None
+
+
+def _sheet_enabled() -> bool:
+    return bool(SHEETS_ID and gspread and Credentials)
+
+
+def _get_sheet():
+    """Return a Google Sheet worksheet if configured; otherwise raise DataError."""
+    global _sheet
+    if _sheet is not None:
+        return _sheet
+    if not _sheet_enabled():
+        raise DataError("Google Sheets not configured.")
+    info = None
+    if GOOGLE_CREDS_JSON:
+        info = json.loads(GOOGLE_CREDS_JSON)
+    elif GOOGLE_CREDS_FILE:
+        cred_path = Path(GOOGLE_CREDS_FILE)
+        if not cred_path.exists():
+            raise DataError(f"Google credentials file not found at {cred_path}")
+        info = json.loads(cred_path.read_text(encoding="utf-8-sig"))
+    else:
+        raise DataError("Missing Google credentials.")
+
+    scopes = [
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive",
+    ]
+    creds = Credentials.from_service_account_info(info, scopes=scopes)
+    client = gspread.authorize(creds)
+    sh = client.open_by_key(SHEETS_ID)
+    try:
+        ws = sh.worksheet(WORKSHEET_NAME)
+    except gspread.WorksheetNotFound:
+        ws = sh.add_worksheet(title=WORKSHEET_NAME, rows="1000", cols="10")
+        ws.update("A1:F1", [["timestamp", "open", "high", "low", "close", "volume"]])
+    _sheet = ws
+    return _sheet
 
 
 def append_live_price() -> Tuple[Optional[float], Optional[datetime]]:
@@ -23,12 +77,24 @@ def append_live_price() -> Tuple[Optional[float], Optional[datetime]]:
 
     price = get_live_gold_price_usa()
     current_time = datetime.now(ZoneInfo("Asia/Riyadh")).replace(microsecond=0)
-    row = {"timestamp": current_time.isoformat(), "open": price, "high": price, "low": price, "close": price, "volume": 0}
+    row = [current_time.isoformat(), price, price, price, price, 0]
+
+    if _sheet_enabled():
+        try:
+            ws = _get_sheet()
+            ws.append_row(row, value_input_option="RAW")
+            _cache["ts"] = 0.0
+            return price, current_time
+        except Exception:
+            pass  # fallback to local below
+
+    # Local CSV fallback
+    row_dict = {"timestamp": row[0], "open": price, "high": price, "low": price, "close": price, "volume": 0}
     if LIVE_DATA_FILE.exists():
         df = pd.read_csv(LIVE_DATA_FILE)
-        df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
+        df = pd.concat([df, pd.DataFrame([row_dict])], ignore_index=True)
     else:
-        df = pd.DataFrame([row])
+        df = pd.DataFrame([row_dict])
     df.to_csv(LIVE_DATA_FILE, index=False)
     _cache["ts"] = 0.0
     return price, current_time
@@ -47,11 +113,32 @@ def _load_local_1m(limit: int = 50000) -> pd.DataFrame:
     return df
 
 
+def _load_sheet_1m(limit: int = 50000) -> pd.DataFrame:
+    ws = _get_sheet()
+    rows = ws.get_all_records()
+    if not rows:
+        raise DataError("No live data collected yet in Google Sheets.")
+    df = pd.DataFrame(rows)
+    if "timestamp" not in df.columns:
+        raise DataError("Timestamp column missing in sheet data.")
+    df["timestamp"] = pd.to_datetime(df["timestamp"])
+    df = df.set_index("timestamp").sort_index()
+    if limit and len(df) > limit:
+        df = df.tail(limit)
+    return df
+
+
 def get_live_collected_data(limit: int = 50000, days_back: int = 40):
     now_ts = time.time()
     if _cache["df"] is not None and now_ts - _cache["ts"] < CACHE_TTL_SECONDS:
         return _cache["df"].copy()
-    df = _load_local_1m(limit=limit)
+    if _sheet_enabled():
+        try:
+            df = _load_sheet_1m(limit=limit)
+        except Exception:
+            df = _load_local_1m(limit=limit)
+    else:
+        df = _load_local_1m(limit=limit)
     _cache["df"] = df
     _cache["ts"] = now_ts
     return df.copy()
@@ -84,7 +171,7 @@ def build_timeframe_candles(df_1m: pd.DataFrame, timeframe: str) -> pd.DataFrame
 
 
 def get_collection_stats() -> dict:
-    df = _load_local_1m()
+    df = _cache["df"] if _cache["df"] is not None else _load_local_1m()
     return {
         "rows": len(df),
         "start": df.index[0].isoformat(),
