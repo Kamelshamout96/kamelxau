@@ -141,17 +141,17 @@ def run_signal():
                     tp_lines.append(f"{tp_emoji.get(key, '🎯')} {key.upper()}: {val}")
             tp_text = "\n".join(tp_lines) if tp_lines else "🎯 TP: n/a"
 
-          msg = (
-            f"<b><span style='font-size:18px;'>════════════════════════════</span></b>\n"
-            f"<b><span style='font-size:20px;'>{action_icon} {unified['action']} XAUUSD {stars}</span></b>\n"
-            f"<b><span style='font-size:18px;'>────────────────────────────</span></b>\n"
-            f"💰 <b><span style='font-size:18px;'>Entry:</span></b> <span style='font-size:18px;'>{unified.get('entry')}</span>\n"
-            f"⛔ <b><span style='font-size:18px;'>Stop Loss:</span></b> <span style='font-size:18px;'>{unified.get('sl')}</span>\n"
-            f"{tp_text}"
-            f"<b><span style='font-size:18px;'>────────────────────────────</span></b>\n"
-            f"🕒 <b><span style='font-size:18px;'>Timeframes:</span></b> <span style='font-size:18px;'>5m • 15m • 1H • 4H</span>\n"
-            f"<b><span style='font-size:18px;'>════════════════════════════</span></b>"
-        )
+            msg = (
+                f"<b><span style='font-size:18px;'>════════════════════════════</span></b>\n"
+                f"<b><span style='font-size:20px;'>{action_icon} {unified['action']} XAUUSD {stars}</span></b>\n"
+                f"<b><span style='font-size:18px;'>────────────────────────────</span></b>\n"
+                f"💰 <b><span style='font-size:18px;'>Entry:</span></b> <span style='font-size:18px;'>{unified.get('entry')}</span>\n"
+                f"⛔ <b><span style='font-size:18px;'>Stop Loss:</span></b> <span style='font-size:18px;'>{unified.get('sl')}</span>\n"
+                f"{tp_text}"
+                f"<b><span style='font-size:18px;'>────────────────────────────</span></b>\n"
+                f"🕒 <b><span style='font-size:18px;'>Timeframes:</span></b> <span style='font-size:18px;'>5m • 15m • 1H • 4H</span>\n"
+                f"<b><span style='font-size:18px;'>════════════════════════════</span></b>"
+            )
 
             send_telegram(TG_TOKEN, TG_CHAT, msg)
 
