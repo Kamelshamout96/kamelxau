@@ -1,6 +1,6 @@
 import ta
 import pandas as pd
-from utils import DataError
+from core.utils import DataError
 
 def add_all_indicators(df: pd.DataFrame) -> pd.DataFrame:
     """Adds EMA50/200, RSI, Stoch, MACD, ADX, ATR, Donchian, and kumo proxy.
