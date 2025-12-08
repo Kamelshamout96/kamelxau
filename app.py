@@ -357,15 +357,15 @@ def human_analysis():
         if not hasattr(human_analysis, "last_result"):
             human_analysis.last_result = None
 
-        signal = human_analysis_result
+        signal = human_analysis_result.get("recommendation")
         try:
             current = {
-                "entry": float(signal.get("entry", 0)),
-                "sl": float(signal.get("sl", 0)),
-                "tp1": float(signal.get("tp1", 0)),
-                "tp2": float(signal.get("tp2", 0)),
-                "tp3": float(signal.get("tp3", 0)),
-                "action": signal["action"]
+                "entry": float(signal["entry"]),
+                "sl": float(signal["sl"]),
+                "tp1": float(signal["tp1"]),
+                "tp2": float(signal["tp2"]),
+                "tp3": float(signal["tp3"]),
+                "action": human_analysis_result["action"]
             }
         except Exception:
             current = None
