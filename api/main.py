@@ -123,19 +123,28 @@ def run_signal():
 
         if unified.get("action") in ("BUY", "SELL") and TG_TOKEN and TG_CHAT:
             action_icon = "🚀" if unified["action"] == "BUY" else "🛑"
-            tp_emoji = {"tp1": "🥇", "tp2": "🥈", "tp3": "🥉", "tp4": "🎯", "tp": "🎯"}
-            tp_values = []
-            for key in ("tp1", "tp2", "tp3", "tp4", "tp"):
+            confidence = unified.get("confidence")
+            stars = ""
+            try:
+                if confidence is not None:
+                    c_val = float(confidence)
+                    stars_count = 3 if c_val >= 85 else 2 if c_val >= 70 else 1
+                    stars = " " + "⭐" * stars_count
+            except Exception:
+                stars = ""
+
+            tp_emoji = {"tp1": "🥇", "tp2": "🥈", "tp3": "🥉"}
+            tp_lines = []
+            for key in ("tp1", "tp2", "tp3"):
                 val = unified.get(key)
                 if val is not None:
-                    icon = tp_emoji.get(key, "🎯")
-                    label = key.upper()
-                    tp_values.append(f"{icon} {label}: {val}")
-            tp_text = "\n".join(tp_values) if tp_values else "🎯 TP: n/a"
+                    tp_lines.append(f"{tp_emoji.get(key, '🎯')} {key.upper()}: {val}")
+            tp_text = "\n".join(tp_lines) if tp_lines else "🎯 TP: n/a"
+
             msg = (
-                f"{action_icon} {unified['action']} XAUUSD\n"
-                f"💰 Entry: {unified.get('entry')}\n"
-                f"⛔ SL: {unified.get('sl')}\n"
+                f"<b>{action_icon} {unified['action']} XAUUSD{stars}</b>\n"
+                f"💰 <b>Entry:</b> {unified.get('entry')}\n"
+                f"⛔ <b>SL:</b> {unified.get('sl')}\n"
                 f"{tp_text}"
             )
             send_telegram(TG_TOKEN, TG_CHAT, msg)
