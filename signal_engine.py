@@ -1,4 +1,4 @@
-def _trend(row):
+﻿def _trend(row):
     """
     Trend with optional structure support.
     If a structure label is present, use it; otherwise fall back to EMA50/200.
@@ -131,6 +131,256 @@ def _confidence_emoji(conf):
     return "⭐️⭐️⭐️" if conf == "HIGH" else ("⭐️⭐️" if conf == "MEDIUM" else "⭐️")
 
 
+def _local_swings(df, lookback=20, window=2):
+    """Lightweight swing detection for micro structure."""
+    swings = {"highs": [], "lows": []}
+    if len(df) < window * 2 + 3:
+        return swings
+    tail = df.tail(lookback)
+    highs = tail["high"].values
+    lows = tail["low"].values
+    closes = tail["close"].values
+    idxs = list(tail.index)
+    for i in range(window, len(tail) - window):
+        if highs[i] >= highs[i - window : i + window + 1].max():
+            swings["highs"].append({"idx": idxs[i], "price": float(highs[i])})
+        if lows[i] <= lows[i - window : i + window + 1].min():
+            swings["lows"].append({"idx": idxs[i], "price": float(lows[i])})
+    swings["closes"] = float(closes[-1]) if len(closes) else None
+    return swings
+
+
+def _structure_bias(swings):
+    """Infer bullish/bearish micro bias from last two swings."""
+    highs = swings.get("highs", [])
+    lows = swings.get("lows", [])
+    bias = "neutral"
+    if len(highs) >= 2 and len(lows) >= 2:
+        last_high, prev_high = highs[-1]["price"], highs[-2]["price"]
+        last_low, prev_low = lows[-1]["price"], lows[-2]["price"]
+        if last_high > prev_high and last_low > prev_low:
+            bias = "bullish"
+        elif last_high < prev_high and last_low < prev_low:
+            bias = "bearish"
+    return bias
+
+
+def _touch_strength(level, df, tolerance=0.0015):
+    """Count touches of a level within a tolerance band."""
+    if level is None or len(df) == 0:
+        return 0
+    highs = df["high"].values
+    lows = df["low"].values
+    band_high = level * (1 + tolerance)
+    band_low = level * (1 - tolerance)
+    touches = ((lows <= band_high) & (highs >= band_low)).sum()
+    return int(touches)
+
+
+def _wick_rejection(candle):
+    """Detect pin-bar style rejection wick on the last candle."""
+    open_, high, low, close = map(float, (candle.get("open"), candle.get("high"), candle.get("low"), candle.get("close")))
+    body = abs(close - open_)
+    upper_wick = high - max(open_, close)
+    lower_wick = min(open_, close) - low
+    if body == 0:
+        body = 1e-8
+    bullish_reject = lower_wick > body * 2 and close > open_
+    bearish_reject = upper_wick > body * 2 and close < open_
+    return bullish_reject, bearish_reject
+
+
+def _liquidity_sweep(df):
+    """Detect micro liquidity sweep on 5m using recent swings."""
+    swings = _local_swings(df, lookback=12, window=2)
+    highs, lows = swings.get("highs", []), swings.get("lows", [])
+    if (not highs and not lows) or len(df) < 3:
+        return {"type": None, "level": None}
+    last = df.iloc[-1]
+    close = float(last.get("close", 0))
+    sweep = {"type": None, "level": None}
+    if len(highs) >= 1:
+        ref = highs[-1]["price"]
+        if float(df["high"].iloc[-1]) > ref * 1.001 and close < ref:
+            sweep = {"type": "above", "level": ref}
+    if sweep["type"] is None and len(lows) >= 1:
+        ref = lows[-1]["price"]
+        if float(df["low"].iloc[-1]) < ref * 0.999 and close > ref:
+            sweep = {"type": "below", "level": ref}
+    return sweep
+
+
+def _micro_bos(df):
+    """Detect micro BOS/CHOCH (close beyond prior swing)."""
+    swings = _local_swings(df, lookback=20, window=2)
+    highs, lows = swings.get("highs", []), swings.get("lows", [])
+    if len(df) < 4:
+        return {"valid": False, "direction": None, "level": None}
+    close = float(df["close"].iloc[-1])
+    if len(highs) >= 1 and close > highs[-1]["price"]:
+        return {"valid": True, "direction": "bullish", "level": highs[-1]["price"]}
+    if len(lows) >= 1 and close < lows[-1]["price"]:
+        return {"valid": True, "direction": "bearish", "level": lows[-1]["price"]}
+    return {"valid": False, "direction": None, "level": None}
+
+
+def _channel_bounds(df, lookback=30):
+    """Approximate channel bounds using recent extrema."""
+    if len(df) == 0:
+        return None
+    tail = df.tail(lookback)
+    upper = float(tail["high"].max())
+    lower = float(tail["low"].min())
+    mid = (upper + lower) / 2
+    return {"upper": upper, "lower": lower, "mid": mid}
+
+
+def _human_struct_scalp(df_5m, df_15m, df_1h, adx5=None, adx15=None):
+    """
+    Human-like micro-structure scalp layer.
+    Returns action if a structural scalp is available; otherwise NO_TRADE.
+    """
+    if len(df_5m) < 8 or len(df_15m) < 4:
+        return {"action": "NO_TRADE"}
+
+    last5 = df_5m.iloc[-1]
+    price = float(last5.get("close", 0))
+    atr5 = float(last5.get("atr", price * 0.01))
+    atr5 = max(atr5, price * 0.003)
+
+    swings_5 = _local_swings(df_5m, lookback=25, window=2)
+    swings_15 = _local_swings(df_15m, lookback=25, window=2)
+    bias_5 = _structure_bias(swings_5)
+    bias_15 = _structure_bias(swings_15)
+    bias = bias_5 if bias_5 != "neutral" else bias_15
+
+    channel = _channel_bounds(df_5m)
+    sweep = _liquidity_sweep(df_5m)
+    micro_bos = _micro_bos(df_5m)
+    bull_wick, bear_wick = _wick_rejection(last5)
+
+    support_candidates = [s["price"] for s in swings_5.get("lows", [])]
+    resistance_candidates = [h["price"] for h in swings_5.get("highs", [])]
+    support_level = max(support_candidates) if support_candidates else None
+    resistance_level = min(resistance_candidates) if resistance_candidates else None
+    support_touches = _touch_strength(support_level, df_5m) if support_level else 0
+    resistance_touches = _touch_strength(resistance_level, df_5m) if resistance_level else 0
+
+    near_support = support_level and abs(price - support_level) / price < 0.0035 and support_touches >= 3
+    near_resistance = resistance_level and abs(price - resistance_level) / price < 0.0035 and resistance_touches >= 3
+
+    channel_support = channel and abs(price - channel["lower"]) / price < 0.004
+    channel_resistance = channel and abs(price - channel["upper"]) / price < 0.004
+
+    direction = None
+    reasoning = []
+    if sweep["type"] == "below":
+        direction = "BUY"
+        reasoning.append(f"Liquidity sweep below {sweep['level']:.2f}")
+    elif sweep["type"] == "above":
+        direction = "SELL"
+        reasoning.append(f"Liquidity sweep above {sweep['level']:.2f}")
+
+    if direction is None and bias in ("bullish", "bearish"):
+        direction = "BUY" if bias == "bullish" else "SELL"
+        reasoning.append(f"Micro structure {bias}")
+
+    if direction is None and channel:
+        if channel_support:
+            direction = "BUY"
+            reasoning.append("Channel support tap")
+        elif channel_resistance:
+            direction = "SELL"
+            reasoning.append("Channel resistance tap")
+
+    if direction is None:
+        return {"action": "NO_TRADE"}
+
+    if direction == "BUY" and bull_wick:
+        reasoning.append("Bullish rejection wick")
+    if direction == "SELL" and bear_wick:
+        reasoning.append("Bearish rejection wick")
+    if micro_bos["valid"]:
+        reasoning.append(f"Micro BOS {micro_bos['direction']}")
+
+    valid_entry = False
+    anchor_level = None
+    if direction == "BUY":
+        if near_support:
+            valid_entry = True
+            anchor_level = support_level
+            reasoning.append(f"Support touch ({support_touches} touches)")
+        if channel_support:
+            valid_entry = True
+            anchor_level = anchor_level or channel["lower"]
+            reasoning.append("Channel support confluence")
+        if sweep["type"] == "below":
+            valid_entry = True
+            anchor_level = anchor_level or sweep["level"]
+        if micro_bos["valid"] and micro_bos["direction"] == "bullish":
+            valid_entry = True
+    else:
+        if near_resistance:
+            valid_entry = True
+            anchor_level = resistance_level
+            reasoning.append(f"Resistance touch ({resistance_touches} touches)")
+        if channel_resistance:
+            valid_entry = True
+            anchor_level = anchor_level or channel["upper"]
+            reasoning.append("Channel resistance confluence")
+        if sweep["type"] == "above":
+            valid_entry = True
+            anchor_level = anchor_level or sweep["level"]
+        if micro_bos["valid"] and micro_bos["direction"] == "bearish":
+            valid_entry = True
+
+    if not valid_entry:
+        return {"action": "NO_TRADE"}
+
+    buffer = max(atr5 * 0.4, price * 0.0015)
+    if direction == "BUY":
+        sl = (anchor_level or price) - buffer
+        tp1 = max([h["price"] for h in swings_5.get("highs", [])], default=price + atr5)
+        tp2 = max(channel["mid"] if channel else tp1, tp1)
+        tp3 = channel["upper"] if channel else tp2 + atr5
+    else:
+        sl = (anchor_level or price) + buffer
+        tp1 = min([l["price"] for l in swings_5.get("lows", [])], default=price - atr5)
+        tp2 = min(channel["mid"] if channel else tp1, tp1)
+        tp3 = channel["lower"] if channel else tp2 - atr5
+
+    confidence = 30
+    if bias != "neutral":
+        confidence += 15
+    if sweep["type"]:
+        confidence += 15
+    if (channel_support and direction == "BUY") or (channel_resistance and direction == "SELL"):
+        confidence += 15
+    if (bull_wick and direction == "BUY") or (bear_wick and direction == "SELL"):
+        confidence += 10
+    if micro_bos["valid"]:
+        confidence += 10
+    if adx5 is not None and adx5 >= 25:
+        confidence += 5
+    if adx15 is not None and adx15 >= 25:
+        confidence += 5
+    confidence = float(min(100, max(0, confidence)))
+
+    visual_story = "; ".join(reasoning) if reasoning else "Human structural scalp setup"
+    return {
+        "action": direction,
+        "entry": round(price, 2),
+        "sl": round(sl, 2),
+        "tp1": round(tp1, 2),
+        "tp2": round(tp2, 2),
+        "tp3": round(tp3, 2),
+        "confidence": confidence,
+        "reasoning": reasoning if reasoning else ["Human structural scalp trigger"],
+        "visual_story": visual_story,
+        "trigger": "HUMAN_STRUCT_SCALP",
+        "signal_type": "SCALP",
+    }
+
 def check_entry(df_5m, df_15m, df_1h, df_4h):
     """
     Scalping-focused multi-timeframe logic with strict ADX gating and cleaned momentum checks.
@@ -177,6 +427,12 @@ def check_entry(df_5m, df_15m, df_1h, df_4h):
     )
 
     adx_conf, tier5, tier15, tier1h, tier4h = _compute_adx_conf(adx5, adx15, adx1h, adx4h)
+
+    # Human-like structural scalp layer (runs before strict SCALP rules)
+    human_layer = _human_struct_scalp(df_5m, df_15m, df_1h, adx5=adx5, adx15=adx15)
+    if human_layer.get("action") in ("BUY", "SELL"):
+        return human_layer
+
     if adx_conf == "blocked":
         return {
             "action": "NO_TRADE",
@@ -821,3 +1077,5 @@ def check_ultra_v3(df_5m, df_15m, df_1h, df_4h):
         },
     }
     return result
+
+
