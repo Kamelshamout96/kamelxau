@@ -426,7 +426,15 @@ def _sanitize_levels(
             if tp_val is None or tp_val >= entry:
                 tp_val = entry - min_move
             safe_tps.append(tp_val)
-    return round(float(safe_sl), 2), [round(float(tp), 2) for tp in safe_tps]
+    safe_tps = _order_tps(action, [round(float(tp), 2) for tp in safe_tps])
+    return round(float(safe_sl), 2), safe_tps
+
+
+def _order_tps(action: str, tps: List[float]) -> List[float]:
+    """Sort TPs so they are ordered correctly for BUY/SELL directions."""
+    if action == "BUY":
+        return sorted(tps)
+    return sorted(tps, reverse=True)
 
 
 def _should_block_duplicate(entry: float, action: str) -> bool:
