@@ -104,14 +104,39 @@ def run_signal():
                     unified = alt_ultra
 
         unified = validate_direction_consistency(unified)
+
+        # Duplicate guard: block re-emitting same action within ±2 USD of last entry
+        last_sig = _load_last_signal()
+        try:
+            if (
+                last_sig
+                and last_sig.get("action") == unified.get("action") in ("BUY", "SELL")
+                and last_sig.get("entry") is not None
+                and unified.get("entry") is not None
+            ):
+                if abs(float(unified["entry"]) - float(last_sig["entry"])) <= 2.0:
+                    return {"status": "duplicate_blocked", "detail": "entry within ±2 USD of last signal", "last": last_sig}
+        except Exception:
+            pass
+
         _save_last_signal(unified)
 
         if unified.get("action") in ("BUY", "SELL") and TG_TOKEN and TG_CHAT:
+            action_icon = "🚀" if unified["action"] == "BUY" else "🛑"
+            tp_emoji = {"tp1": "🥇", "tp2": "🥈", "tp3": "🥉", "tp4": "🎯", "tp": "🎯"}
+            tp_values = []
+            for key in ("tp1", "tp2", "tp3", "tp4", "tp"):
+                val = unified.get(key)
+                if val is not None:
+                    icon = tp_emoji.get(key, "🎯")
+                    label = key.upper()
+                    tp_values.append(f"{icon} {label}: {val}")
+            tp_text = "\n".join(tp_values) if tp_values else "🎯 TP: n/a"
             msg = (
-                f"{unified['action']} XAUUSD\n"
-                f"Entry: {unified.get('entry')}\n"
-                f"SL: {unified.get('sl')}\n"
-                f"TP: {unified.get('tp1', unified.get('tp'))}"
+                f"{action_icon} {unified['action']} XAUUSD\n"
+                f"💰 Entry: {unified.get('entry')}\n"
+                f"⛔ SL: {unified.get('sl')}\n"
+                f"{tp_text}"
             )
             send_telegram(TG_TOKEN, TG_CHAT, msg)
 
