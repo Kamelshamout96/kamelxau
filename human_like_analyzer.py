@@ -289,6 +289,31 @@ class HumanLikeAnalyzer:
         
         return sweeps
     
+    def is_zone_invalid_by_sweep(self, zone: Zone, sweeps: List[str]) -> bool:
+        """Return True if a liquidity sweep invalidates a supply zone."""
+        if not sweeps or zone is None or zone.zone_type != 'supply':
+            return False
+        
+        try:
+            for sweep in sweeps:
+                if 'above' not in sweep.lower():
+                    continue
+                
+                sweep_price = None
+                for token in sweep.replace('$', ' ').replace(',', ' ').split():
+                    try:
+                        sweep_price = float(token)
+                        break
+                    except ValueError:
+                        continue
+                
+                if sweep_price is not None and sweep_price > float(zone.upper_price):
+                    return True
+        except Exception:
+            return False
+        
+        return False
+    
     
     def find_support_resistance(self, df: pd.DataFrame, 
                                swings: List[SwingPoint]) -> List[SupportResistance]:
@@ -891,10 +916,12 @@ class HumanLikeAnalyzer:
                 elif active_supply:
                     # Only SELL from supply if NOT in bullish channel
                     if not (channel and 'up' in channel.pattern_type):
-                        strongest = max(active_supply, key=lambda z: z.strength)
-                        action = 'SELL'
-                        reasoning.append(f"✓✓ SELL from supply zone (strength {strongest.strength}/5)")
-                        confidence += 18
+                        valid_supply = [z for z in active_supply if not self.is_zone_invalid_by_sweep(z, sweeps)]
+                        if valid_supply:
+                            strongest = max(valid_supply, key=lambda z: z.strength)
+                            action = 'SELL'
+                            reasoning.append(f"✓✓ SELL from supply zone (strength {strongest.strength}/5)")
+                            confidence += 18
             
             # PRIORITY 3: Visual prediction mode
             if action == 'NO_TRADE' and visual_prediction:
