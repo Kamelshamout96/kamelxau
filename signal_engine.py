@@ -252,7 +252,7 @@ def _human_struct_scalp(df_5m, df_15m, df_1h, adx5=None, adx15=None):
     swings_15 = _local_swings(df_15m, lookback=25, window=2)
     bias_5 = _structure_bias(swings_5)
     bias_15 = _structure_bias(swings_15)
-    bias = bias_5 if bias_5 != "neutral" else bias_15
+    bias = bias_5
 
     channel = _channel_bounds(df_5m)
     sweep = _liquidity_sweep(df_5m)
@@ -266,11 +266,11 @@ def _human_struct_scalp(df_5m, df_15m, df_1h, adx5=None, adx15=None):
     support_touches = _touch_strength(support_level, df_5m) if support_level else 0
     resistance_touches = _touch_strength(resistance_level, df_5m) if resistance_level else 0
 
-    near_support = support_level and abs(price - support_level) / price < 0.0035 and support_touches >= 3
-    near_resistance = resistance_level and abs(price - resistance_level) / price < 0.0035 and resistance_touches >= 3
+    near_support = support_level and abs(price - support_level) / price < 0.0035 and support_touches >= 2
+    near_resistance = resistance_level and abs(price - resistance_level) / price < 0.0035 and resistance_touches >= 2
 
-    channel_support = channel and abs(price - channel["lower"]) / price < 0.004
-    channel_resistance = channel and abs(price - channel["upper"]) / price < 0.004
+    channel_support = channel and abs(price - channel["lower"]) / price < 0.007
+    channel_resistance = channel and abs(price - channel["upper"]) / price < 0.007
 
     direction = None
     reasoning = []
@@ -334,7 +334,7 @@ def _human_struct_scalp(df_5m, df_15m, df_1h, adx5=None, adx15=None):
         if micro_bos["valid"] and micro_bos["direction"] == "bearish":
             valid_entry = True
 
-    if not valid_entry:
+    if not valid_entry and not micro_bos["valid"]:
         return {"action": "NO_TRADE"}
 
     buffer = max(atr5 * 0.4, price * 0.0015)
