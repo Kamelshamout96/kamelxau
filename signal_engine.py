@@ -386,22 +386,71 @@ def check_entry(df_5m, df_15m, df_1h, df_4h):
     """
     Scalping-focused multi-timeframe logic with strict ADX gating and cleaned momentum checks.
     """
+    timeframe = "5m"
+
+    def _trend_safe(row):
+        try:
+            t = _trend(row)
+            if t not in ("bullish", "bearish", "neutral"):
+                raise ValueError()
+            return t
+        except Exception:
+            try:
+                if row["close"] > row["ema200"] and row["ema50"] > row["ema200"]:
+                    return "bullish"
+                if row["close"] < row["ema200"] and row["ema50"] < row["ema200"]:
+                    return "bearish"
+            except Exception:
+                return "neutral"
+            return "neutral"
+
+    def _with_meta(payload, trend_val):
+        payload["timeframe"] = timeframe
+        payload["trend"] = trend_val
+        return payload
+
+    def _is_major_demand(row):
+        keys = ["major_demand", "major_demand_zone", "demand_zone_major", "in_major_demand", "major_demand_flag"]
+        if any(row.get(k) for k in keys if hasattr(row, "get")):
+            return True
+        strength = 0
+        for k in ["demand_zone_strength", "demand_strength", "demand_score"]:
+            try:
+                strength = max(strength, float(row.get(k, 0)))
+            except Exception:
+                continue
+        in_zone = bool(row.get("in_demand_zone") if hasattr(row, "get") else False)
+        return in_zone and strength >= 4
+
+    def _is_major_supply(row):
+        keys = ["major_supply", "major_supply_zone", "supply_zone_major", "in_major_supply", "major_supply_flag"]
+        if any(row.get(k) for k in keys if hasattr(row, "get")):
+            return True
+        strength = 0
+        for k in ["supply_zone_strength", "supply_strength", "supply_score"]:
+            try:
+                strength = max(strength, float(row.get(k, 0)))
+            except Exception:
+                continue
+        in_zone = bool(row.get("in_supply_zone") if hasattr(row, "get") else False)
+        return in_zone and strength >= 4
+
     min_required = 8
     if len(df_5m) < min_required:
-        return {
+        return _with_meta({
             "action": "NO_TRADE",
             "reason": f"Not enough candles (need >= {min_required}) in one of the timeframes",
             "market_status": "Data too short for safe scalping check",
             "signal_type": "SCALP",
-        }
+        }, "neutral")
     for name, df in [("15m", df_15m), ("1h", df_1h), ("4h", df_4h)]:
         if len(df) < 1:
-            return {
+            return _with_meta({
                 "action": "NO_TRADE",
                 "reason": f"Not enough {name} candles (need >=1)",
                 "market_status": "Data too short for safe scalping check",
                 "signal_type": "SCALP",
-            }
+            }, "neutral")
 
     last5 = df_5m.iloc[-1]
     prev5 = df_5m.iloc[-2]
@@ -414,9 +463,9 @@ def check_entry(df_5m, df_15m, df_1h, df_4h):
     adx1h = float(last1h.get("adx", 0))
     adx4h = float(last4h.get("adx", 0))
 
-    trend_1h = _trend(last1h)
-    trend_4h = _trend(last4h)
-    mid_trend = _trend(last15)
+    trend_1h = _trend_safe(last1h)
+    trend_4h = _trend_safe(last4h)
+    mid_trend = _trend_safe(last15)
     sl_atr = float(last1h.get("atr", last5.get("atr", 0)))
     tp_atr = float(last5.get("atr", sl_atr if sl_atr else 0))
     if sl_atr <= 0:
@@ -432,31 +481,31 @@ def check_entry(df_5m, df_15m, df_1h, df_4h):
     # Human-like structural scalp layer (runs before strict SCALP rules)
     human_layer = _human_struct_scalp(df_5m, df_15m, df_1h, adx5=adx5, adx15=adx15)
     if human_layer.get("action") in ("BUY", "SELL"):
-        return human_layer
+        return _with_meta(human_layer, trend_1h)
 
     if adx_conf == "blocked":
-        return {
+        return _with_meta({
             "action": "NO_TRADE",
             "reason": "ADX below 20 blocks entry",
             "market_status": status_msg,
             "signal_type": "SCALP",
-        }
+        }, trend_1h)
 
     if trend_1h != trend_4h or trend_1h == "neutral":
-        return {
+        return _with_meta({
             "action": "NO_TRADE",
             "reason": f"HTF mismatch: 4H={trend_4h}, 1H={trend_1h}",
             "market_status": status_msg,
             "signal_type": "SCALP",
-        }
+        }, trend_1h)
 
     if mid_trend not in (trend_1h, "neutral"):
-        return {
+        return _with_meta({
             "action": "NO_TRADE",
             "reason": f"15m divergence: 15m={mid_trend} vs HTF={trend_1h}",
             "market_status": status_msg,
             "signal_type": "SCALP",
-        }
+        }, trend_1h)
 
     main_trend = trend_1h
     price = last5["close"]
@@ -475,11 +524,30 @@ def check_entry(df_5m, df_15m, df_1h, df_4h):
             sl_max_dist=25.0,
             tp_max_dist=12.0,
         )
+    
+    def _guard_levels(direction, sl, tp):
+        tp_dist = abs(tp - price)
+        min_tp_move = max(tp_dist, tp_atr * 0.5)
+        min_sl_move = max(abs(sl - price), sl_atr * 0.5 if sl_atr else tp_atr * 0.5)
+        if direction == "BUY":
+            if tp <= price:
+                tp = price + min_tp_move
+            if sl >= price:
+                sl = price - min_sl_move
+        else:
+            if tp >= price:
+                tp = price - min_tp_move
+            if sl <= price:
+                sl = price + min_sl_move
+        return round(sl, 2), round(tp, 2)
 
     rsi_cross = detect_rsi_cross(prev5.get("rsi"), last5.get("rsi"))
     macd_up = strong_macd_momentum(df_5m, "bullish")
     macd_down = strong_macd_momentum(df_5m, "bearish")
     emoji = _confidence_emoji(adx_conf)
+
+    demand_block = _is_major_demand(last5) or _is_major_demand(last15) or _is_major_demand(last1h) or _is_major_demand(last4h)
+    supply_block = _is_major_supply(last5) or _is_major_supply(last15) or _is_major_supply(last1h) or _is_major_supply(last4h)
 
     if main_trend == "bullish":
         buy_ok = (
@@ -489,19 +557,19 @@ def check_entry(df_5m, df_15m, df_1h, df_4h):
             and last5["stoch_k"] >= last5["stoch_d"]
             and over_extension < 0.01
         )
-        if buy_ok:
+        if buy_ok and not supply_block:
             sl, tp = _calc_sl_tp("BUY")
-            return {
+            sl, tp = _guard_levels("BUY", sl, tp)
+            return _with_meta({
                 "action": "BUY",
                 "confidence": adx_conf,
                 "confidence_emoji": emoji,
                 "entry": float(price),
                 "sl": sl,
                 "tp": tp,
-                "timeframe": "5m",
                 "market_status": status_msg,
                 "signal_type": "SCALP",
-            }
+            }, main_trend)
 
     if main_trend == "bearish":
         sell_ok = (
@@ -511,26 +579,31 @@ def check_entry(df_5m, df_15m, df_1h, df_4h):
             and last5["stoch_k"] <= last5["stoch_d"]
             and over_extension < 0.01
         )
-        if sell_ok:
+        if sell_ok and not demand_block:
             sl, tp = _calc_sl_tp("SELL")
-            return {
+            sl, tp = _guard_levels("SELL", sl, tp)
+            return _with_meta({
                 "action": "SELL",
                 "confidence": adx_conf,
                 "confidence_emoji": emoji,
                 "entry": float(price),
                 "sl": sl,
                 "tp": tp,
-                "timeframe": "5m",
                 "market_status": status_msg,
                 "signal_type": "SCALP",
-            }
+            }, main_trend)
 
-    return {
+    block_reason = None
+    if main_trend == "bearish" and demand_block:
+        block_reason = "Blocked by major demand zone"
+    if main_trend == "bullish" and supply_block:
+        block_reason = "Blocked by major supply zone"
+    return _with_meta({
         "action": "NO_TRADE",
-        "reason": f"Waiting for aligned momentum. Trend={main_trend}.",
+        "reason": block_reason or f"Waiting for aligned momentum. Trend={main_trend}.",
         "market_status": status_msg,
         "signal_type": "SCALP",
-    }
+    }, main_trend)
 
 
 def check_golden_entry(df_5m, df_15m, df_1h, df_4h):

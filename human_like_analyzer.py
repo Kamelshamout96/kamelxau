@@ -603,6 +603,154 @@ class HumanLikeAnalyzer:
         return zones
     
     
+    def detect_bos_choch(self, df: pd.DataFrame, swings: List[SwingPoint]) -> Dict[str, bool]:
+        """Detect simple BOS/CHOCH using last swing breaches - STABLE"""
+        result = {'bullish': False, 'bearish': False, 'label': 'none'}
+        
+        if df is None or len(df) == 0 or not swings:
+            return result
+        
+        try:
+            swings_sorted = sorted(swings, key=lambda x: x.time)
+            highs = [s for s in swings_sorted if s.swing_type == 'high']
+            lows = [s for s in swings_sorted if s.swing_type == 'low']
+            last_close = float(df['close'].iloc[-1])
+            tolerance = max(self.price_tolerance, 0.0005)
+            
+            if len(highs) >= 2:
+                prev_high = float(highs[-2].price)
+                if last_close > prev_high * (1 + tolerance):
+                    result['bullish'] = True
+                    result['label'] = 'BOS'
+            
+            if len(lows) >= 2:
+                prev_low = float(lows[-2].price)
+                if last_close < prev_low * (1 - tolerance):
+                    result['bearish'] = True
+                    result['label'] = 'BOS'
+            
+            if result['label'] == 'none' and len(highs) >= 2 and len(lows) >= 2:
+                last_high = float(highs[-1].price)
+                last_low = float(lows[-1].price)
+                prev_high = float(highs[-2].price)
+                prev_low = float(lows[-2].price)
+                if last_high > prev_high * (1 + tolerance) and last_low < prev_low * (1 - tolerance):
+                    result['label'] = 'CHOCH'
+        except Exception:
+            return result
+        
+        return result
+    
+    
+    def micro_structure_bias(self, swings: List[SwingPoint]) -> str:
+        """Classify near-term structure into bullish/bearish/neutral"""
+        if not swings or len(swings) < 4:
+            return 'neutral'
+        
+        try:
+            swings_sorted = sorted(swings, key=lambda x: x.time)
+            highs = [s for s in swings_sorted if s.swing_type == 'high'][-2:]
+            lows = [s for s in swings_sorted if s.swing_type == 'low'][-2:]
+            
+            if len(highs) < 2 or len(lows) < 2:
+                return 'neutral'
+            
+            tolerance = max(self.price_tolerance / 2, 0.0005)
+            higher_high = float(highs[-1].price) > float(highs[-2].price) * (1 + tolerance)
+            higher_low = float(lows[-1].price) > float(lows[-2].price) * (1 + tolerance)
+            lower_high = float(highs[-1].price) < float(highs[-2].price) * (1 - tolerance)
+            lower_low = float(lows[-1].price) < float(lows[-2].price) * (1 - tolerance)
+            
+            if higher_high and higher_low:
+                return 'bullish'
+            if lower_high and lower_low:
+                return 'bearish'
+        except Exception:
+            return 'neutral'
+        
+        return 'neutral'
+    
+    
+    def determine_trend_bias(self, df: pd.DataFrame, structure: List[str]) -> str:
+        """Blend structure and moving average slope into a simple trend bias"""
+        bias = 'neutral'
+        
+        try:
+            if structure:
+                if any('Bullish' in s or 'HH' in s or 'HL' in s for s in structure):
+                    bias = 'bullish'
+                elif any('Bearish' in s or 'LH' in s or 'LL' in s for s in structure):
+                    bias = 'bearish'
+            
+            if df is None or len(df) < 5:
+                return bias
+            
+            closes = df['close'].astype(float)
+            fast_len = min(50, len(closes))
+            slow_len = min(150, len(closes))
+            if fast_len == 0 or slow_len == 0:
+                return bias
+            
+            fast_ma = float(closes.tail(fast_len).mean())
+            slow_ma = float(closes.tail(slow_len).mean())
+            
+            if slow_ma == 0:
+                return bias
+            
+            if fast_ma > slow_ma * (1 + self.price_tolerance / 2):
+                bias = 'bullish'
+            elif fast_ma < slow_ma * (1 - self.price_tolerance / 2):
+                bias = 'bearish'
+        except Exception:
+            return bias
+        
+        return bias
+    
+    
+    def build_zone_context(self, price: float, zones: List[Zone]) -> Dict:
+        """Summarize nearby supply/demand zones for SMC gating"""
+        context = {
+            'in_demand': False,
+            'in_supply': False,
+            'active_demand_zone': None,
+            'active_supply_zone': None,
+            'supply_above_dist': None,
+            'demand_below_dist': None,
+            'conflicting_zones': False
+        }
+        
+        if price <= 0 or not zones:
+            return context
+        
+        try:
+            tolerance = max(0.5, price * 0.0015)
+            
+            active_demand = [z for z in zones if z.zone_type == 'demand' and (z.lower_price - tolerance) <= price <= (z.upper_price + tolerance)]
+            active_supply = [z for z in zones if z.zone_type == 'supply' and (z.lower_price - tolerance) <= price <= (z.upper_price + tolerance)]
+            
+            if active_demand:
+                context['in_demand'] = True
+                context['active_demand_zone'] = max(active_demand, key=lambda z: z.strength)
+            
+            if active_supply:
+                context['in_supply'] = True
+                context['active_supply_zone'] = max(active_supply, key=lambda z: z.strength)
+            
+            above_supply = [z for z in zones if z.zone_type == 'supply' and z.lower_price > price]
+            below_demand = [z for z in zones if z.zone_type == 'demand' and z.upper_price < price]
+            
+            if above_supply:
+                context['supply_above_dist'] = float(min(z.lower_price - price for z in above_supply))
+            if below_demand:
+                context['demand_below_dist'] = float(min(price - z.upper_price for z in below_demand))
+            
+            context['conflicting_zones'] = bool(active_demand and active_supply)
+        except Exception:
+            return context
+        
+        return context
+    
+    
     def calculate_multi_tp(self, action: str, entry: float, nearest_resistance: Optional[SupportResistance],
                           nearest_support: Optional[SupportResistance], channel: Optional[ChartPattern],
                           atr: float) -> Tuple[float, float, float]:
@@ -1101,11 +1249,60 @@ def analyze_like_human(df_5m: pd.DataFrame, df_15m: pd.DataFrame,
         analyzer_1h = HumanLikeAnalyzer(lookback_candles=300)
         analyzer_15m = HumanLikeAnalyzer(lookback_candles=400)
         analyzer_5m = HumanLikeAnalyzer(lookback_candles=500)
+
+        def _build_smc_context(analyzer: HumanLikeAnalyzer, df: pd.DataFrame, setup: TradeSetup) -> Dict:
+            ctx = {
+                'price': 0.0,
+                'trend': 'neutral',
+                'micro': 'neutral',
+                'bos': {'bullish': False, 'bearish': False, 'label': 'none'},
+                'sweeps': [],
+                'in_demand': False,
+                'in_supply': False,
+                'active_demand_zone': None,
+                'active_supply_zone': None,
+                'supply_above_dist': None,
+                'demand_below_dist': None,
+                'conflicting_zones': False,
+                'structure': setup.structure_labels if setup else []
+            }
+            
+            if df is None or len(df) == 0:
+                return ctx
+            
+            df_local = df.tail(analyzer.lookback).copy() if analyzer.lookback and len(df) > analyzer.lookback else df
+            price = float(df_local['close'].iloc[-1])
+            swings = analyzer.find_swing_points(df_local)
+            structure = analyzer.detect_market_structure(swings)
+            zones = analyzer.find_supply_demand_zones(df_local, swings)
+            sweeps = analyzer.detect_liquidity_sweeps(df_local, swings)
+            bos = analyzer.detect_bos_choch(df_local, swings)
+            micro_bias = analyzer.micro_structure_bias(swings)
+            trend_bias = analyzer.determine_trend_bias(df_local, structure)
+            zone_ctx = analyzer.build_zone_context(price, zones)
+            
+            ctx.update({
+                'price': price,
+                'trend': trend_bias,
+                'micro': micro_bias,
+                'bos': bos,
+                'sweeps': sweeps,
+                'structure': structure
+            })
+            ctx.update(zone_ctx)
+            return ctx
         
         setup_4h = analyzer_4h.generate_trade_setup(df_4h, '4H')
         setup_1h = analyzer_1h.generate_trade_setup(df_1h, '1H')
         setup_15m = analyzer_15m.generate_trade_setup(df_15m, '15m')
         setup_5m = analyzer_5m.generate_trade_setup(df_5m, '5m')
+
+        smc_ctx = {
+            '4H': _build_smc_context(analyzer_4h, df_4h, setup_4h),
+            '1H': _build_smc_context(analyzer_1h, df_1h, setup_1h),
+            '15m': _build_smc_context(analyzer_15m, df_15m, setup_15m),
+            '5m': _build_smc_context(analyzer_5m, df_5m, setup_5m)
+        }
         
         struct_bonus = 0.0
         if setup_4h.structure_labels and setup_1h.structure_labels:
@@ -1136,7 +1333,7 @@ def analyze_like_human(df_5m: pd.DataFrame, df_15m: pd.DataFrame,
             + pattern_bonus
         )
 
-        # Decide final action by descending priority of timeframes
+        # Decide preliminary action by descending priority of timeframes
         deciding_tf = None
         final_action = 'NO_TRADE'
         final_conf = 0.0
@@ -1152,17 +1349,135 @@ def analyze_like_human(df_5m: pd.DataFrame, df_15m: pd.DataFrame,
                 final_action = setup.action
                 final_conf = float(setup.confidence + bonus)
                 break
+        
+        micro_ctx = smc_ctx['15m'] if smc_ctx['15m']['price'] > 0 else smc_ctx['5m']
+
+        def _pick_tf_for_action(action: str, fallback: str) -> str:
+            for tf_name in ['1H', '4H', '15m', '5m']:
+                candidate = tf_setups[tf_name]
+                if candidate.action == action:
+                    return tf_name
+            return fallback
+
+        # SMC unified gating
+        trend_confluence_buy = smc_ctx['4H']['trend'] == 'bullish' and smc_ctx['1H']['trend'] == 'bullish'
+        trend_confluence_sell = smc_ctx['4H']['trend'] == 'bearish' and smc_ctx['1H']['trend'] == 'bearish'
+        micro_bullish = micro_ctx['micro'] == 'bullish' or smc_ctx['1H']['micro'] == 'bullish'
+        micro_bearish = micro_ctx['micro'] == 'bearish' or smc_ctx['1H']['micro'] == 'bearish'
+        bos_bullish = smc_ctx['1H']['bos']['bullish'] or micro_ctx['bos']['bullish'] or smc_ctx['4H']['bos']['bullish']
+        bos_bearish = smc_ctx['1H']['bos']['bearish'] or micro_ctx['bos']['bearish'] or smc_ctx['4H']['bos']['bearish']
+        demand_touch = smc_ctx['1H']['in_demand'] or micro_ctx['in_demand']
+        supply_touch = smc_ctx['1H']['in_supply'] or micro_ctx['in_supply']
+        supply_above_dist = smc_ctx['1H']['supply_above_dist']
+        demand_below_dist = smc_ctx['1H']['demand_below_dist']
+        supply_and_demand_close = supply_above_dist is not None and demand_below_dist is not None and supply_above_dist <= 12 and demand_below_dist <= 12
+        neutral_between = supply_and_demand_close and micro_ctx['micro'] == 'neutral'
+        htf_conflict = setup_4h.action != 'NO_TRADE' and setup_1h.action != 'NO_TRADE' and setup_4h.action != setup_1h.action
+        
+        trend_zone_block_buy = trend_confluence_sell and demand_touch and not bos_bullish
+        trend_zone_block_sell = trend_confluence_buy and supply_touch and not bos_bearish
+        strong_demand = smc_ctx['1H']['active_demand_zone'] if isinstance(smc_ctx['1H']['active_demand_zone'], Zone) else None
+        strong_supply = smc_ctx['1H']['active_supply_zone'] if isinstance(smc_ctx['1H']['active_supply_zone'], Zone) else None
+        sell_blocked_by_demand = strong_demand and strong_demand.strength >= 4 and smc_ctx['1H']['in_demand'] and not bos_bearish
+        buy_blocked_by_supply = strong_supply and strong_supply.strength >= 4 and smc_ctx['1H']['in_supply'] and not bos_bullish
+
+        smc_notes = []
+
+        if neutral_between:
+            smc_notes.append("SMC filter: price trapped between nearby supply and demand without structure shift")
+        if supply_and_demand_close:
+            smc_notes.append("SMC filter: both supply and demand are clustered - no clean imbalance")
+        if htf_conflict:
+            smc_notes.append("SMC filter: 4H vs 1H actions disagree, blocking trade")
+
+        smc_buy_allowed = (
+            trend_confluence_buy
+            and micro_bullish
+            and demand_touch
+            and (supply_above_dist is None or supply_above_dist > 12 or bos_bullish)
+            and not trend_zone_block_buy
+            and not buy_blocked_by_supply
+        )
+        smc_sell_allowed = (
+            trend_confluence_sell
+            and micro_bearish
+            and supply_touch
+            and (demand_below_dist is None or demand_below_dist > 12 or bos_bearish)
+            and not trend_zone_block_sell
+            and not sell_blocked_by_demand
+        )
+
+        if neutral_between or supply_and_demand_close or htf_conflict:
+            smc_buy_allowed = False
+            smc_sell_allowed = False
+
+        smc_action = 'NO_TRADE'
+        if smc_buy_allowed and smc_sell_allowed:
+            smc_action = 'BUY' if smc_ctx['4H']['trend'] == 'bullish' else ('SELL' if smc_ctx['4H']['trend'] == 'bearish' else 'NO_TRADE')
+            smc_notes.append("SMC filter: both paths valid, defaulting to HTF trend bias")
+        elif smc_buy_allowed:
+            smc_action = 'BUY'
+        elif smc_sell_allowed:
+            smc_action = 'SELL'
+
+        if smc_action == 'NO_TRADE':
+            final_action = 'NO_TRADE'
+        else:
+            final_action = smc_action
+            if final_conf == 0.0:
+                final_conf = combined_conf
+
+        deciding_tf = _pick_tf_for_action(final_action, deciding_tf or '1H')
+        deciding_setup = tf_setups.get(deciding_tf or '1H')
+
+        smc_bonus = 0.0
+        if final_action == 'BUY':
+            if bos_bullish:
+                smc_bonus += 20
+            if demand_touch:
+                smc_bonus += 20
+            if trend_confluence_buy:
+                smc_bonus += 20
+            if any('below' in str(s).lower() for s in micro_ctx['sweeps']):
+                smc_bonus += 15
+            if deciding_setup.key_levels.get('channel_support'):
+                smc_bonus += 10
+        elif final_action == 'SELL':
+            if bos_bearish:
+                smc_bonus += 20
+            if supply_touch:
+                smc_bonus += 20
+            if trend_confluence_sell:
+                smc_bonus += 20
+            if any('above' in str(s).lower() for s in micro_ctx['sweeps']):
+                smc_bonus += 15
+            if deciding_setup.key_levels.get('channel_resistance'):
+                smc_bonus += 10
+
+        final_conf = round(min(100.0, max(0.0, (final_conf if final_action != 'NO_TRADE' else 0.0) + smc_bonus)), 1)
 
         # If still no trade, rely on blended confidence only for reference
         if final_action == 'NO_TRADE':
             final_conf = 0.0
-        
-        # Use the deciding timeframe's prices for the final recommendation
-        deciding_setup = tf_setups.get(deciding_tf or '1H')
+            deciding_setup = tf_setups.get(deciding_tf or '1H')
+        else:
+            deciding_setup = tf_setups.get(deciding_tf or '1H')
+
+        merged_reasoning = deciding_setup.reasoning + setup_4h.reasoning
+        if smc_notes:
+            merged_reasoning = merged_reasoning + smc_notes
+        if abs(deciding_setup.entry_price - setup_4h.entry_price) < 2:
+            deduped = []
+            seen = set()
+            for item in merged_reasoning:
+                if item not in seen:
+                    deduped.append(item)
+                    seen.add(item)
+            merged_reasoning = deduped
 
         return {
             'action': final_action,
-            'confidence': round(min(100.0, max(0.0, final_conf)), 1),
+            'confidence': final_conf,
             'timeframe_analysis': {
                 '4H': {
                     'action': setup_4h.action,
@@ -1245,7 +1560,7 @@ def analyze_like_human(df_5m: pd.DataFrame, df_15m: pd.DataFrame,
                 'tp1': deciding_setup.tp1 if final_action != 'NO_TRADE' else 0.0,
                 'tp2': deciding_setup.tp2 if final_action != 'NO_TRADE' else 0.0,
                 'tp3': deciding_setup.tp3 if final_action != 'NO_TRADE' else 0.0,
-                'reasoning': deciding_setup.reasoning + setup_4h.reasoning,
+                'reasoning': merged_reasoning,
                 'visual_story': deciding_setup.visual_story,
                 'next_move': deciding_setup.next_move
             }
