@@ -370,6 +370,82 @@ def send_telegram(token, chat_id, msg):
         print(f"✗ Failed to send Telegram message: {e}")
 
 
+def validate_direction_consistency(signal: dict) -> dict:
+    """
+    Final safety net to ensure action aligns with SL/TP positioning.
+    Returns a corrected copy without touching upstream generators.
+    """
+    if not isinstance(signal, dict):
+        return signal
+
+    result = dict(signal)
+    action = str(result.get("action", "")).upper()
+
+    def _to_float(val):
+        try:
+            return float(val)
+        except Exception:
+            return None
+
+    entry = _to_float(result.get("entry"))
+    sl = _to_float(result.get("sl"))
+
+    tp_key = None
+    tp_value = None
+    for key in ("tp", "tp1", "tp2", "tp3", "tp4"):
+        val = _to_float(result.get(key))
+        if val is not None:
+            tp_key, tp_value = key, val
+            break
+
+    if action not in ("BUY", "SELL") or entry is None or sl is None or tp_value is None:
+        return result
+
+    def _direction_ok(direction: str, stop: float, target: float) -> bool:
+        if direction == "BUY":
+            return stop < entry and target > entry
+        return stop > entry and target < entry
+
+    flipped_action = "SELL" if action == "BUY" else "BUY"
+
+    if _direction_ok(action, sl, tp_value):
+        return result
+
+    if _direction_ok(flipped_action, sl, tp_value):
+        result["action"] = flipped_action
+        result["validation_note"] = f"Action flipped to {flipped_action} to match SL/TP orientation"
+        return result
+
+    swapped_sl, swapped_tp = tp_value, sl
+    if _direction_ok(action, swapped_sl, swapped_tp):
+        result["sl"] = swapped_sl
+        if tp_key:
+            result[tp_key] = swapped_tp
+        else:
+            result["tp"] = swapped_tp
+        result["validation_note"] = "Swapped SL/TP to align with declared action"
+        return result
+
+    if _direction_ok(flipped_action, swapped_sl, swapped_tp):
+        result["action"] = flipped_action
+        result["sl"] = swapped_sl
+        if tp_key:
+            result[tp_key] = swapped_tp
+        else:
+            result["tp"] = swapped_tp
+        result["validation_note"] = f"Swapped SL/TP and flipped to {flipped_action} for consistency"
+        return result
+
+    prev_reason = result.get("reason")
+    result["action"] = "NO_TRADE"
+    result["reason"] = "inconsistent SL/TP"
+    if prev_reason:
+        result["validation_note"] = f"Overrode action due to inconsistent SL/TP (previous reason: {prev_reason})"
+    else:
+        result["validation_note"] = "Overrode action due to inconsistent SL/TP"
+    return result
+
+
 def get_live_gold_price_usa():
     """
     Fetch live Spot Gold price per ounce in USD from livepriceofgold.com.

@@ -7,7 +7,13 @@ from zoneinfo import ZoneInfo
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 
-from utils import send_telegram, DataError, isMarketOpen, nextMarketOpen
+from utils import (
+    send_telegram,
+    DataError,
+    isMarketOpen,
+    nextMarketOpen,
+    validate_direction_consistency,
+)
 from live_data_collector import (
     append_live_price,
     get_live_collected_data,
@@ -224,15 +230,20 @@ def run_signal():
         )
         signal = check_entry(df_5m, df_15m, df_1h, df_4h)
         # ULTRA V3 primary fallback
-        ultra_v3 = check_ultra_v3(df_5m, df_15m, df_1h, df_4h)
-        if signal.get("action") == "NO_TRADE" and ultra_v3.get("action") in ("BUY", "SELL"):
-            ultra_v3.setdefault("timeframe", "5m")
-            signal = ultra_v3
+        ultra_v3_raw = check_ultra_v3(df_5m, df_15m, df_1h, df_4h)
+        if signal.get("action") == "NO_TRADE" and ultra_v3_raw.get("action") in ("BUY", "SELL"):
+            ultra_v3_raw.setdefault("timeframe", "5m")
+            signal = ultra_v3_raw
         # ULTRA v1 secondary fallback
-        ultra_signal = check_ultra_entry(df_5m, df_15m, df_1h, df_4h)
-        if signal.get("action") == "NO_TRADE" and ultra_signal.get("action") in ("BUY", "SELL"):
-            ultra_signal.setdefault("timeframe", "5m")
-            signal = ultra_signal
+        ultra_signal_raw = check_ultra_entry(df_5m, df_15m, df_1h, df_4h)
+        if signal.get("action") == "NO_TRADE" and ultra_signal_raw.get("action") in ("BUY", "SELL"):
+            ultra_signal_raw.setdefault("timeframe", "5m")
+            signal = ultra_signal_raw
+
+        # Final direction/level validation after all engines
+        signal = validate_direction_consistency(signal)
+        ultra_v3 = validate_direction_consistency(ultra_v3_raw)
+        ultra_signal = validate_direction_consistency(ultra_signal_raw)
 
         # Telegram alerts for potential setups / trend updates
         def _send_alert(title: str, body: str) -> None:
@@ -352,6 +363,15 @@ def human_analysis():
         
         # Run human-like analysis
         human_analysis_result = analyze_like_human(df_5m, df_15m, df_1h, df_4h)
+        human_recommendation = human_analysis_result.get("recommendation", {})
+        human_analysis_result["recommendation"] = validate_direction_consistency(human_recommendation)
+
+        tf_map = human_analysis_result.get("timeframe_analysis", {})
+        if isinstance(tf_map, dict):
+            human_analysis_result["timeframe_analysis"] = {
+                name: validate_direction_consistency(payload)
+                for name, payload in tf_map.items()
+            }
         
         current_price = df_5m['close'].iloc[-1]
         
