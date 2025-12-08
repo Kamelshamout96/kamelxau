@@ -1360,10 +1360,27 @@ def analyze_like_human(df_5m: pd.DataFrame, df_15m: pd.DataFrame,
             return fallback
 
         # --- HTF master direction gate (4H & 1H must agree; 15m cannot contradict) ---
+        def _infer_bias(setup: TradeSetup) -> Optional[str]:
+            # Prefer explicit action if BUY/SELL
+            if setup.action in ("BUY", "SELL"):
+                return setup.action
+            # Derive from structure labels or patterns
+            labels = [s.lower() for s in (setup.structure_labels or [])]
+            patterns = [p.lower() for p in (setup.patterns_detected or [])]
+            if any("bullish" in s or "hh" in s for s in labels) or any("up_channel" in p for p in patterns):
+                return "BUY"
+            if any("bearish" in s or "ll" in s for s in labels) or any("down_channel" in p for p in patterns):
+                return "SELL"
+            return None
+
+        bias_4h = _infer_bias(setup_4h)
+        bias_1h = _infer_bias(setup_1h)
+        bias_15m = _infer_bias(setup_15m)
+
         master_action = 'NO_TRADE'
-        if setup_4h.action == setup_1h.action and setup_4h.action in ('BUY', 'SELL'):
-            if setup_15m.action in (setup_4h.action, 'NO_TRADE'):
-                master_action = setup_4h.action
+        if bias_4h == bias_1h and bias_4h in ('BUY', 'SELL'):
+            if bias_15m in (bias_4h, None, 'NO_TRADE'):
+                master_action = bias_4h
 
         if master_action == 'NO_TRADE':
             final_action = 'NO_TRADE'
@@ -1439,12 +1456,12 @@ def analyze_like_human(df_5m: pd.DataFrame, df_15m: pd.DataFrame,
             final_action = 'NO_TRADE'
         else:
             # 5m cannot override HTF; enforce master gate
-            if master_action == 'NO_TRADE':
-                final_action = 'NO_TRADE'
-            else:
+            if master_action != 'NO_TRADE':
                 final_action = master_action
                 if final_conf == 0.0:
                     final_conf = combined_conf
+            else:
+                final_action = 'NO_TRADE'
 
         deciding_tf = _pick_tf_for_action(final_action, deciding_tf or '1H')
         deciding_setup = tf_setups.get(deciding_tf or '1H')
@@ -1605,7 +1622,7 @@ def analyze_like_human(df_5m: pd.DataFrame, df_15m: pd.DataFrame,
         }, master_action if master_action != 'NO_TRADE' else setup_15m.action)
 
         tf_payload_5m = _fix_orientation({
-            'action': master_action if master_action != 'NO_TRADE' else setup_5m.action,
+            'action': master_action if master_action != 'NO_TRADE' else setup_5m.action if master_action == 'NO_TRADE' else master_action,
             'confidence': round(setup_5m.confidence, 1),
             'entry': setup_5m.entry_price,
             'sl': setup_5m.sl_price,
@@ -1624,7 +1641,7 @@ def analyze_like_human(df_5m: pd.DataFrame, df_15m: pd.DataFrame,
         }, master_action if master_action != 'NO_TRADE' else setup_5m.action)
 
         rec_payload = _fix_orientation({
-            'action': final_action,
+            'action': final_action if master_action != 'NO_TRADE' else final_action,
             'entry': deciding_setup.entry_price if final_action != 'NO_TRADE' else 0.0,
             'sl': deciding_setup.sl_price if final_action != 'NO_TRADE' else 0.0,
             'tp': deciding_setup.tp_price if final_action != 'NO_TRADE' else 0.0,
@@ -1634,7 +1651,7 @@ def analyze_like_human(df_5m: pd.DataFrame, df_15m: pd.DataFrame,
             'reasoning': merged_reasoning,
             'visual_story': deciding_setup.visual_story,
             'next_move': deciding_setup.next_move
-        }, final_action)
+        }, master_action if master_action != 'NO_TRADE' else final_action)
 
         return {
             'action': final_action,
