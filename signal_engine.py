@@ -1,4 +1,32 @@
-﻿def _trend(row):
+import math
+from typing import Any, Dict, List, Optional, Tuple
+
+
+_LAST_SIGNAL_STATE: Dict[str, Optional[float]] = {"entry": None, "action": None}
+_DUPLICATE_BAND = 2.0  # USD band to block duplicate alerts
+
+
+def _safe_float(val: Any, default: Optional[float] = None) -> Optional[float]:
+    """Convert to float safely."""
+    try:
+        if val is None:
+            return default
+        f = float(val)
+        if math.isnan(f):
+            return default
+        return f
+    except Exception:
+        return default
+
+
+def _sanitize_action(action: Any) -> str:
+    if isinstance(action, str):
+        act = action.upper()
+        return act if act in ("BUY", "SELL", "NO_TRADE") else "NO_TRADE"
+    return "NO_TRADE"
+
+
+def _trend(row: Dict[str, Any]) -> str:
     """
     Trend with optional structure support.
     If a structure label is present, use it; otherwise fall back to EMA50/200.
@@ -6,28 +34,38 @@
     struct = row.get("market_structure") if hasattr(row, "get") else None
     if struct in ("bullish", "bearish"):
         return struct
-    if row["close"] > row["ema200"] and row["ema50"] > row["ema200"]:
-        return "bullish"
-    if row["close"] < row["ema200"] and row["ema50"] < row["ema200"]:
-        return "bearish"
+    try:
+        if row["close"] > row["ema200"] and row["ema50"] > row["ema200"]:
+            return "bullish"
+        if row["close"] < row["ema200"] and row["ema50"] < row["ema200"]:
+            return "bearish"
+    except Exception:
+        return "neutral"
     return "neutral"
 
 
+def _final_direction(trend_4h: str, trend_1h: str) -> str:
+    if trend_4h == "bullish" and trend_1h == "bullish":
+        return "BUY"
+    if trend_4h == "bearish" and trend_1h == "bearish":
+        return "SELL"
+    return "NO_TRADE"
+
+
 def calculate_sl_tp(
-    entry,
-    atr,
-    direction,
-    sl_atr_mult=1.2,
-    tp_atr_mult=1.0,
-    max_dist=12.0,
-    sl_atr=None,
-    sl_max_dist=25.0,
-    tp_atr=None,
-    tp_max_dist=12.0,
-):
+    entry: float,
+    atr: float,
+    direction: str,
+    sl_atr_mult: float = 1.2,
+    tp_atr_mult: float = 1.0,
+    max_dist: float = 12.0,
+    sl_atr: Optional[float] = None,
+    sl_max_dist: float = 25.0,
+    tp_atr: Optional[float] = None,
+    tp_max_dist: float = 12.0,
+) -> Tuple[float, float]:
     """
-    SL = structure ref +/- ATR*1.2 (prefers 1H ATR), capped at $25.
-    TP = entry +/- ATR*1.0 (prefers 5m ATR), capped at $12.
+    ATR-based SL/TP helper (used as fallback only).
     """
     sl_src_atr = sl_atr if sl_atr is not None else atr
     tp_src_atr = tp_atr if tp_atr is not None else atr
@@ -87,7 +125,7 @@ def strong_macd_momentum(df, direction, lookback=3):
     return False
 
 
-def _adx_tier(val):
+def _adx_tier(val: Any) -> str:
     """Return ADX tier: blocked (<20), medium (20-25), high (>=25)."""
     try:
         v = float(val)
@@ -125,10 +163,6 @@ def _compute_adx_conf(adx5, adx15, adx1h=None, adx4h=None):
         conf = "HIGH"
 
     return conf, tier5, tier15, tier1h, tier4h
-
-
-def _confidence_emoji(conf):
-    return "⭐️⭐️⭐️" if conf == "HIGH" else ("⭐️⭐️" if conf == "MEDIUM" else "⭐️")
 
 
 def _local_swings(df, lookback=20, window=2):
@@ -190,38 +224,74 @@ def _wick_rejection(candle):
     return bullish_reject, bearish_reject
 
 
-def _liquidity_sweep(df):
-    """Detect micro liquidity sweep on 5m using recent swings."""
-    swings = _local_swings(df, lookback=12, window=2)
-    highs, lows = swings.get("highs", []), swings.get("lows", [])
-    if (not highs and not lows) or len(df) < 3:
+def _liquidity_sweep(df, lookback: int = 14) -> Dict[str, Any]:
+    """Detect liquidity sweep (high/low violation with close back inside)."""
+    if len(df) < 3:
         return {"type": None, "level": None}
-    last = df.iloc[-1]
-    close = float(last.get("close", 0))
+    tail = df.tail(lookback)
+    prev = tail.iloc[:-1]
+    last = tail.iloc[-1]
+    prev_high = float(prev["high"].max())
+    prev_low = float(prev["low"].min())
+    close = float(last["close"])
     sweep = {"type": None, "level": None}
-    if len(highs) >= 1:
-        ref = highs[-1]["price"]
-        if float(df["high"].iloc[-1]) > ref * 1.001 and close < ref:
-            sweep = {"type": "above", "level": ref}
-    if sweep["type"] is None and len(lows) >= 1:
-        ref = lows[-1]["price"]
-        if float(df["low"].iloc[-1]) < ref * 0.999 and close > ref:
-            sweep = {"type": "below", "level": ref}
+    if float(last["high"]) > prev_high and close < prev_high:
+        sweep = {"type": "above", "level": prev_high}
+    elif float(last["low"]) < prev_low and close > prev_low:
+        sweep = {"type": "below", "level": prev_low}
     return sweep
 
 
-def _micro_bos(df):
-    """Detect micro BOS/CHOCH (close beyond prior swing)."""
-    swings = _local_swings(df, lookback=20, window=2)
-    highs, lows = swings.get("highs", []), swings.get("lows", [])
-    if len(df) < 4:
-        return {"valid": False, "direction": None, "level": None}
-    close = float(df["close"].iloc[-1])
-    if len(highs) >= 1 and close > highs[-1]["price"]:
-        return {"valid": True, "direction": "bullish", "level": highs[-1]["price"]}
-    if len(lows) >= 1 and close < lows[-1]["price"]:
-        return {"valid": True, "direction": "bearish", "level": lows[-1]["price"]}
-    return {"valid": False, "direction": None, "level": None}
+def _detect_structure(df, lookback: int = 120, window: int = 3) -> Dict[str, Any]:
+    swings = _local_swings(df, lookback=lookback, window=window)
+    highs = swings.get("highs", [])
+    lows = swings.get("lows", [])
+    label = None
+    bias = "neutral"
+    if len(highs) >= 2 and len(lows) >= 2:
+        last_high, prev_high = highs[-1]["price"], highs[-2]["price"]
+        last_low, prev_low = lows[-1]["price"], lows[-2]["price"]
+        if last_high > prev_high and last_low > prev_low:
+            label = "HH-HL"
+            bias = "bullish"
+        elif last_high < prev_high and last_low < prev_low:
+            label = "LH-LL"
+            bias = "bearish"
+        else:
+            label = "mixed"
+    return {
+        "label": label,
+        "bias": bias,
+        "last_high": highs[-1]["price"] if highs else None,
+        "last_low": lows[-1]["price"] if lows else None,
+        "swings": swings,
+    }
+
+
+def _detect_zones(df) -> Dict[str, Any]:
+    """Detect demand/supply zones with touch count and confidence."""
+    swings = _local_swings(df, lookback=120, window=3)
+    demand_zone = None
+    supply_zone = None
+    touches_d = touches_s = 0
+
+    if swings.get("lows"):
+        base_low = swings["lows"][-1]["price"]
+        demand_zone = {"low": base_low * 0.998, "high": base_low * 1.002}
+        touches_d = _touch_strength((demand_zone["low"] + demand_zone["high"]) / 2, df)
+
+    if swings.get("highs"):
+        base_high = swings["highs"][-1]["price"]
+        supply_zone = {"low": base_high * 0.998, "high": base_high * 1.002}
+        touches_s = _touch_strength((supply_zone["low"] + supply_zone["high"]) / 2, df)
+
+    conf_d = min(100, 40 + touches_d * 15) if demand_zone else 0
+    conf_s = min(100, 40 + touches_s * 15) if supply_zone else 0
+
+    return {
+        "demand": {"zone": demand_zone, "touches": touches_d, "confidence": conf_d},
+        "supply": {"zone": supply_zone, "touches": touches_s, "confidence": conf_s},
+    }
 
 
 def _channel_bounds(df, lookback=30):
@@ -235,921 +305,561 @@ def _channel_bounds(df, lookback=30):
     return {"upper": upper, "lower": lower, "mid": mid}
 
 
-def _human_struct_scalp(df_5m, df_15m, df_1h, adx5=None, adx15=None):
-    """
-    Human-like micro-structure scalp layer.
-    Returns action if a structural scalp is available; otherwise NO_TRADE.
-    """
-    if len(df_5m) < 8 or len(df_15m) < 4:
-        return {"action": "NO_TRADE"}
+def _detect_channel_context(df, price: float) -> Dict[str, Any]:
+    bounds = _channel_bounds(df, lookback=60)
+    if not bounds:
+        return {"type": None, "bounds": None, "tap": None}
+    slope = float(df["close"].tail(8).diff().mean())
+    channel_type = "up" if slope > 0 else ("down" if slope < 0 else "internal")
+    tap_support = abs(price - bounds["lower"]) / price < 0.006
+    tap_resistance = abs(price - bounds["upper"]) / price < 0.006
+    tap = "support" if tap_support else ("resistance" if tap_resistance else None)
+    return {
+        "type": channel_type,
+        "bounds": bounds,
+        "tap": tap,
+    }
 
-    last5 = df_5m.iloc[-1]
-    price = float(last5.get("close", 0))
-    atr5 = float(last5.get("atr", price * 0.01))
-    atr5 = max(atr5, price * 0.003)
 
-    swings_5 = _local_swings(df_5m, lookback=25, window=2)
-    swings_15 = _local_swings(df_15m, lookback=25, window=2)
-    bias_5 = _structure_bias(swings_5)
-    bias_15 = _structure_bias(swings_15)
-    bias = bias_5
-
-    channel = _channel_bounds(df_5m)
-    sweep = _liquidity_sweep(df_5m)
-    micro_bos = _micro_bos(df_5m)
-    bull_wick, bear_wick = _wick_rejection(last5)
-
-    support_candidates = [s["price"] for s in swings_5.get("lows", [])]
-    resistance_candidates = [h["price"] for h in swings_5.get("highs", [])]
-    support_level = max(support_candidates) if support_candidates else None
-    resistance_level = min(resistance_candidates) if resistance_candidates else None
-    support_touches = _touch_strength(support_level, df_5m) if support_level else 0
-    resistance_touches = _touch_strength(resistance_level, df_5m) if resistance_level else 0
-
-    near_support = support_level and abs(price - support_level) / price < 0.0035 and support_touches >= 2
-    near_resistance = resistance_level and abs(price - resistance_level) / price < 0.0035 and resistance_touches >= 2
-
-    channel_support = channel and abs(price - channel["lower"]) / price < 0.007
-    channel_resistance = channel and abs(price - channel["upper"]) / price < 0.007
-
+def _detect_bos_choch(df, label: str) -> Dict[str, Any]:
+    swings = _local_swings(df, lookback=50, window=2)
+    highs = swings.get("highs", [])
+    lows = swings.get("lows", [])
+    close = float(df["close"].iloc[-1])
+    event_type = None
     direction = None
-    reasoning = []
-    if sweep["type"] == "below":
-        direction = "BUY"
-        reasoning.append(f"Liquidity sweep below {sweep['level']:.2f}")
-    elif sweep["type"] == "above":
-        direction = "SELL"
-        reasoning.append(f"Liquidity sweep above {sweep['level']:.2f}")
+    level = None
 
-    if direction is None and bias in ("bullish", "bearish"):
-        direction = "BUY" if bias == "bullish" else "SELL"
-        reasoning.append(f"Micro structure {bias}")
-
-    if direction is None and channel:
-        if channel_support:
-            direction = "BUY"
-            reasoning.append("Channel support tap")
-        elif channel_resistance:
-            direction = "SELL"
-            reasoning.append("Channel resistance tap")
-
-    if direction is None:
-        return {"action": "NO_TRADE"}
-
-    if direction == "BUY" and bull_wick:
-        reasoning.append("Bullish rejection wick")
-    if direction == "SELL" and bear_wick:
-        reasoning.append("Bearish rejection wick")
-    if micro_bos["valid"]:
-        reasoning.append(f"Micro BOS {micro_bos['direction']}")
-
-    valid_entry = False
-    anchor_level = None
-    if direction == "BUY":
-        if near_support:
-            valid_entry = True
-            anchor_level = support_level
-            reasoning.append(f"Support touch ({support_touches} touches)")
-        if channel_support:
-            valid_entry = True
-            anchor_level = anchor_level or channel["lower"]
-            reasoning.append("Channel support confluence")
-        if sweep["type"] == "below":
-            valid_entry = True
-            anchor_level = anchor_level or sweep["level"]
-        if micro_bos["valid"] and micro_bos["direction"] == "bullish":
-            valid_entry = True
+    if highs and close > highs[-1]["price"]:
+        event_type, direction, level = "BOS", "bullish", highs[-1]["price"]
+    elif lows and close < lows[-1]["price"]:
+        event_type, direction, level = "BOS", "bearish", lows[-1]["price"]
     else:
-        if near_resistance:
-            valid_entry = True
-            anchor_level = resistance_level
-            reasoning.append(f"Resistance touch ({resistance_touches} touches)")
-        if channel_resistance:
-            valid_entry = True
-            anchor_level = anchor_level or channel["upper"]
-            reasoning.append("Channel resistance confluence")
-        if sweep["type"] == "above":
-            valid_entry = True
-            anchor_level = anchor_level or sweep["level"]
-        if micro_bos["valid"] and micro_bos["direction"] == "bearish":
-            valid_entry = True
+        prev_bias = _structure_bias({"highs": highs[:-1], "lows": lows[:-1]}) if len(highs) > 1 and len(lows) > 1 else "neutral"
+        cur_bias = _structure_bias(swings)
+        if prev_bias != "neutral" and cur_bias != "neutral" and prev_bias != cur_bias:
+            event_type, direction = "CHOCH", cur_bias
 
-    if not valid_entry and not micro_bos["valid"]:
-        return {"action": "NO_TRADE"}
+    return {"timeframe": label, "type": event_type, "direction": direction, "level": level}
 
-    buffer = max(atr5 * 0.4, price * 0.0015)
-    if direction == "BUY":
-        sl = (anchor_level or price) - buffer
-        tp1 = max([h["price"] for h in swings_5.get("highs", [])], default=price + atr5)
-        tp2 = max(channel["mid"] if channel else tp1, tp1)
-        tp3 = channel["upper"] if channel else tp2 + atr5
+
+def _detect_imbalance(df) -> Dict[str, Any]:
+    """Detect a simple Fair Value Gap (FVG) on the last 3 candles."""
+    if len(df) < 3:
+        return {"bullish": False, "bearish": False}
+    a, b, c = df.iloc[-3], df.iloc[-2], df.iloc[-1]
+    bullish = b["low"] > a["high"]
+    bearish = b["high"] < a["low"]
+    return {"bullish": bool(bullish), "bearish": bool(bearish)}
+
+
+def _build_human_explanation(
+    structure: Dict[str, Any],
+    sweeps: Dict[str, Any],
+    zones: Dict[str, Any],
+    channels: Dict[str, Any],
+    bos15: Dict[str, Any],
+    bos5: Dict[str, Any],
+    imbalances: Dict[str, Any],
+    wicks: Dict[str, Any],
+    master_direction: str,
+) -> List[str]:
+    notes: List[str] = []
+    for tf, info in structure.items():
+        if info.get("label"):
+            notes.append(f"{tf} structure {info['label']} ({info['bias']})")
+    if sweeps.get("15m", {}).get("type"):
+        notes.append(f"15m liquidity sweep {sweeps['15m']['type']}")
+    if sweeps.get("5m", {}).get("type"):
+        notes.append(f"5m liquidity sweep {sweeps['5m']['type']}")
+    if zones.get("demand", {}).get("zone") and master_direction == "BUY":
+        notes.append(
+            f"Demand zone touched {zones['demand']['touches']} times (conf {zones['demand']['confidence']:.0f}%)"
+        )
+    if zones.get("supply", {}).get("zone") and master_direction == "SELL":
+        notes.append(
+            f"Supply zone touched {zones['supply']['touches']} times (conf {zones['supply']['confidence']:.0f}%)"
+        )
+    if channels.get("tap"):
+        notes.append(f"Channel tap at {channels['tap']} ({channels['type']})")
+    if bos15.get("type"):
+        notes.append(f"15m {bos15['type']} {bos15.get('direction')}")
+    if bos5.get("type"):
+        notes.append(f"5m {bos5['type']} {bos5.get('direction')}")
+    if imbalances.get("bullish"):
+        notes.append("Bullish FVG present")
+    if imbalances.get("bearish"):
+        notes.append("Bearish FVG present")
+    if wicks.get("bullish"):
+        notes.append("Wick rejection to the downside")
+    if wicks.get("bearish"):
+        notes.append("Wick rejection to the upside")
+    if not notes:
+        notes.append("No strong discretionary cues detected")
+    return notes
+
+
+def _sanitize_levels(
+    action: str,
+    entry: float,
+    sl: Optional[float],
+    tps: List[Optional[float]],
+    atr_fallback: float,
+) -> Tuple[float, List[float]]:
+    """Ensure SL/TP respect BUY/SELL geometry and sanitize NaN/None."""
+    action = _sanitize_action(action)
+    entry = float(entry)
+    min_move = atr_fallback if atr_fallback and atr_fallback > 0 else max(entry * 0.001, 0.5)
+    if action == "BUY":
+        safe_sl = sl if sl is not None and sl < entry else entry - min_move
+        safe_tps = []
+        for tp in tps:
+            tp_val = _safe_float(tp)
+            if tp_val is None or tp_val <= entry:
+                tp_val = entry + min_move
+            safe_tps.append(tp_val)
     else:
-        sl = (anchor_level or price) + buffer
-        tp1 = min([l["price"] for l in swings_5.get("lows", [])], default=price - atr5)
-        tp2 = min(channel["mid"] if channel else tp1, tp1)
-        tp3 = channel["lower"] if channel else tp2 - atr5
+        safe_sl = sl if sl is not None and sl > entry else entry + min_move
+        safe_tps = []
+        for tp in tps:
+            tp_val = _safe_float(tp)
+            if tp_val is None or tp_val >= entry:
+                tp_val = entry - min_move
+            safe_tps.append(tp_val)
+    return round(float(safe_sl), 2), [round(float(tp), 2) for tp in safe_tps]
 
-    confidence = 30
-    if bias != "neutral":
-        confidence += 15
-    if sweep["type"]:
-        confidence += 15
-    if (channel_support and direction == "BUY") or (channel_resistance and direction == "SELL"):
-        confidence += 15
-    if (bull_wick and direction == "BUY") or (bear_wick and direction == "SELL"):
-        confidence += 10
-    if micro_bos["valid"]:
-        confidence += 10
-    if adx5 is not None and adx5 >= 25:
-        confidence += 5
-    if adx15 is not None and adx15 >= 25:
-        confidence += 5
-    confidence = float(min(100, max(0, confidence)))
 
-    visual_story = "; ".join(reasoning) if reasoning else "Human structural scalp setup"
-    return {
-        "action": direction,
-        "entry": round(price, 2),
-        "sl": round(sl, 2),
-        "tp": round(tp1, 2),
-        "tp1": round(tp1, 2),
-        "tp2": round(tp2, 2),
-        "tp3": round(tp3, 2),
-        "confidence": confidence,
-        "reasoning": reasoning if reasoning else ["Human structural scalp trigger"],
-        "visual_story": visual_story,
-        "trigger": "HUMAN_STRUCT_SCALP",
-        "signal_type": "SCALP",
+def _should_block_duplicate(entry: float, action: str) -> bool:
+    last_entry = _LAST_SIGNAL_STATE.get("entry")
+    last_action = _LAST_SIGNAL_STATE.get("action")
+    if last_entry is not None and last_action == action:
+        if abs(float(entry) - float(last_entry)) <= _DUPLICATE_BAND:
+            return True
+    return False
+
+
+def _record_signal(entry: float, action: str) -> None:
+    _LAST_SIGNAL_STATE["entry"] = float(entry)
+    _LAST_SIGNAL_STATE["action"] = action
+
+
+def _score_trade(context: Dict[str, Any]) -> Tuple[int, Dict[str, int]]:
+    """Apply the fixed human-like scoring matrix."""
+    breakdown = {
+        "htf_alignment": 40 if context.get("htf_alignment") else 0,
+        "zones": 25 if context.get("zones") else 0,
+        "liquidity": 20 if context.get("liquidity") else 0,
+        "channels": 15 if context.get("channels") else 0,
+        "bos": 15 if context.get("bos") else 0,
+        "wick": 10 if context.get("wick") else 0,
+        "momentum": 10 if context.get("momentum") else 0,
     }
-
-def check_entry(df_5m, df_15m, df_1h, df_4h):
-    """
-    Scalping-focused multi-timeframe logic with strict ADX gating and cleaned momentum checks.
-    """
-    timeframe = "5m"
-
-    def _trend_safe(row):
-        try:
-            t = _trend(row)
-            if t not in ("bullish", "bearish", "neutral"):
-                raise ValueError()
-            return t
-        except Exception:
-            try:
-                if row["close"] > row["ema200"] and row["ema50"] > row["ema200"]:
-                    return "bullish"
-                if row["close"] < row["ema200"] and row["ema50"] < row["ema200"]:
-                    return "bearish"
-            except Exception:
-                return "neutral"
-            return "neutral"
-
-    def _with_meta(payload, trend_val):
-        payload["timeframe"] = timeframe
-        payload["trend"] = trend_val
-        return payload
-
-    def _is_major_demand(row):
-        keys = ["major_demand", "major_demand_zone", "demand_zone_major", "in_major_demand", "major_demand_flag"]
-        if any(row.get(k) for k in keys if hasattr(row, "get")):
-            return True
-        strength = 0
-        for k in ["demand_zone_strength", "demand_strength", "demand_score"]:
-            try:
-                strength = max(strength, float(row.get(k, 0)))
-            except Exception:
-                continue
-        in_zone = bool(row.get("in_demand_zone") if hasattr(row, "get") else False)
-        return in_zone and strength >= 4
-
-    def _is_major_supply(row):
-        keys = ["major_supply", "major_supply_zone", "supply_zone_major", "in_major_supply", "major_supply_flag"]
-        if any(row.get(k) for k in keys if hasattr(row, "get")):
-            return True
-        strength = 0
-        for k in ["supply_zone_strength", "supply_strength", "supply_score"]:
-            try:
-                strength = max(strength, float(row.get(k, 0)))
-            except Exception:
-                continue
-        in_zone = bool(row.get("in_supply_zone") if hasattr(row, "get") else False)
-        return in_zone and strength >= 4
-
-    min_required = 8
-    if len(df_5m) < min_required:
-        return _with_meta({
-            "action": "NO_TRADE",
-            "reason": f"Not enough candles (need >= {min_required}) in one of the timeframes",
-            "market_status": "Data too short for safe scalping check",
-            "signal_type": "SCALP",
-        }, "neutral")
-    for name, df in [("15m", df_15m), ("1h", df_1h), ("4h", df_4h)]:
-        if len(df) < 1:
-            return _with_meta({
-                "action": "NO_TRADE",
-                "reason": f"Not enough {name} candles (need >=1)",
-                "market_status": "Data too short for safe scalping check",
-                "signal_type": "SCALP",
-            }, "neutral")
-
-    last5 = df_5m.iloc[-1]
-    prev5 = df_5m.iloc[-2]
-    last15 = df_15m.iloc[-1]
-    last1h = df_1h.iloc[-1]
-    last4h = df_4h.iloc[-1]
-
-    adx5 = float(last5.get("adx", 0))
-    adx15 = float(last15.get("adx", 0))
-    adx1h = float(last1h.get("adx", 0))
-    adx4h = float(last4h.get("adx", 0))
-
-    trend_1h = _trend_safe(last1h)
-    trend_4h = _trend_safe(last4h)
-    mid_trend = _trend_safe(last15)
-    sl_atr = float(last1h.get("atr", last5.get("atr", 0)))
-    tp_atr = float(last5.get("atr", sl_atr if sl_atr else 0))
-    if sl_atr <= 0:
-        sl_atr = tp_atr
-
-    status_msg = (
-        f"Trend 4H/1H/15m: {trend_4h}/{trend_1h}/{mid_trend} | "
-        f"ADX5m={adx5:.1f} ADX15m={adx15:.1f}"
-    )
-
-    adx_conf, tier5, tier15, tier1h, tier4h = _compute_adx_conf(adx5, adx15, adx1h, adx4h)
-
-    # Human-like structural scalp layer (runs before strict SCALP rules)
-    human_layer = _human_struct_scalp(df_5m, df_15m, df_1h, adx5=adx5, adx15=adx15)
-    if human_layer.get("action") in ("BUY", "SELL"):
-        return _with_meta(human_layer, trend_1h)
-
-    if adx_conf == "blocked":
-        return _with_meta({
-            "action": "NO_TRADE",
-            "reason": "ADX below 20 blocks entry",
-            "market_status": status_msg,
-            "signal_type": "SCALP",
-        }, trend_1h)
-
-    if trend_1h != trend_4h or trend_1h == "neutral":
-        return _with_meta({
-            "action": "NO_TRADE",
-            "reason": f"HTF mismatch: 4H={trend_4h}, 1H={trend_1h}",
-            "market_status": status_msg,
-            "signal_type": "SCALP",
-        }, trend_1h)
-
-    if mid_trend not in (trend_1h, "neutral"):
-        return _with_meta({
-            "action": "NO_TRADE",
-            "reason": f"15m divergence: 15m={mid_trend} vs HTF={trend_1h}",
-            "market_status": status_msg,
-            "signal_type": "SCALP",
-        }, trend_1h)
-
-    main_trend = trend_1h
-    price = last5["close"]
-    ema50 = last5["ema50"]
-    ema200 = last5["ema200"]
-    over_extension = abs(price - ema50) / ema50
-
-    def _calc_sl_tp(direction):
-        return calculate_sl_tp(
-            price,
-            tp_atr,
-            direction,
-            sl_atr_mult=1.2,
-            tp_atr_mult=1.0,
-            sl_atr=sl_atr,
-            sl_max_dist=25.0,
-            tp_max_dist=12.0,
-        )
-    
-    def _guard_levels(direction, sl, tp):
-        tp_dist = abs(tp - price)
-        min_tp_move = max(tp_dist, tp_atr * 0.5)
-        min_sl_move = max(abs(sl - price), sl_atr * 0.5 if sl_atr else tp_atr * 0.5)
-        if direction == "BUY":
-            if tp <= price:
-                tp = price + min_tp_move
-            if sl >= price:
-                sl = price - min_sl_move
-        else:
-            if tp >= price:
-                tp = price - min_tp_move
-            if sl <= price:
-                sl = price + min_sl_move
-        return round(sl, 2), round(tp, 2)
-
-    rsi_cross = detect_rsi_cross(prev5.get("rsi"), last5.get("rsi"))
-    macd_up = strong_macd_momentum(df_5m, "bullish")
-    macd_down = strong_macd_momentum(df_5m, "bearish")
-    emoji = _confidence_emoji(adx_conf)
-
-    demand_block = _is_major_demand(last5) or _is_major_demand(last15) or _is_major_demand(last1h) or _is_major_demand(last4h)
-    supply_block = _is_major_supply(last5) or _is_major_supply(last15) or _is_major_supply(last1h) or _is_major_supply(last4h)
-
-    if main_trend == "bullish":
-        buy_ok = (
-            price > ema50 > ema200
-            and rsi_cross == "bullish"
-            and macd_up
-            and last5["stoch_k"] >= last5["stoch_d"]
-            and over_extension < 0.01
-        )
-        if buy_ok and not supply_block:
-            sl, tp = _calc_sl_tp("BUY")
-            sl, tp = _guard_levels("BUY", sl, tp)
-            return _with_meta({
-                "action": "BUY",
-                "confidence": adx_conf,
-                "confidence_emoji": emoji,
-                "entry": float(price),
-                "sl": sl,
-                "tp": tp,
-                "market_status": status_msg,
-                "signal_type": "SCALP",
-            }, main_trend)
-
-    if main_trend == "bearish":
-        sell_ok = (
-            price < ema50 < ema200
-            and rsi_cross == "bearish"
-            and macd_down
-            and last5["stoch_k"] <= last5["stoch_d"]
-            and over_extension < 0.01
-        )
-        if sell_ok and not demand_block:
-            sl, tp = _calc_sl_tp("SELL")
-            sl, tp = _guard_levels("SELL", sl, tp)
-            return _with_meta({
-                "action": "SELL",
-                "confidence": adx_conf,
-                "confidence_emoji": emoji,
-                "entry": float(price),
-                "sl": sl,
-                "tp": tp,
-                "market_status": status_msg,
-                "signal_type": "SCALP",
-            }, main_trend)
-
-    block_reason = None
-    if main_trend == "bearish" and demand_block:
-        block_reason = "Blocked by major demand zone"
-    if main_trend == "bullish" and supply_block:
-        block_reason = "Blocked by major supply zone"
-    return _with_meta({
-        "action": "NO_TRADE",
-        "reason": block_reason or f"Waiting for aligned momentum. Trend={main_trend}.",
-        "market_status": status_msg,
-        "signal_type": "SCALP",
-    }, main_trend)
+    total = sum(breakdown.values())
+    return total, breakdown
 
 
-def check_golden_entry(df_5m, df_15m, df_1h, df_4h):
-    """
-    Very strict confluence filter for high-confidence scalps.
-    """
-    if min(len(df_5m), len(df_15m), len(df_1h), len(df_4h)) < 10:
-        return {
-            "action": "NO_TRADE",
-            "reason": "Not enough candles for golden setup (need >=10 each timeframe)",
-            "signal_type": "GOLDEN",
-        }
+def _build_levels(
+    direction: str,
+    entry: float,
+    df_5m,
+    df_15m,
+    df_1h,
+    zones: Dict[str, Any],
+    channel_ctx: Dict[str, Any],
+    atr5: float,
+    atr1h: float,
+) -> Tuple[float, float, float, float]:
+    swings_5 = _local_swings(df_5m, lookback=40, window=2)
+    swings_15 = _local_swings(df_15m, lookback=60, window=2)
+    highs = [h["price"] for h in swings_5.get("highs", []) + swings_15.get("highs", [])]
+    lows = [l["price"] for l in swings_5.get("lows", []) + swings_15.get("lows", [])]
 
+    sl_level = None
+    tp_candidates: List[float] = []
+
+    if direction == "BUY":
+        if zones.get("demand", {}).get("zone"):
+            sl_level = zones["demand"]["zone"]["low"]
+        if lows:
+            sl_level = min(sl_level, min(lows)) if sl_level is not None else min(lows)
+        if channel_ctx.get("bounds"):
+            sl_level = min(sl_level, channel_ctx["bounds"]["lower"]) if sl_level is not None else channel_ctx["bounds"]["lower"]
+
+        if zones.get("supply", {}).get("zone"):
+            tp_candidates.append(zones["supply"]["zone"]["high"])
+        tp_candidates += [h for h in highs if h > entry]
+        if channel_ctx.get("bounds"):
+            tp_candidates.append(channel_ctx["bounds"]["upper"])
+    else:
+        if zones.get("supply", {}).get("zone"):
+            sl_level = zones["supply"]["zone"]["high"]
+        if highs:
+            sl_level = max(sl_level, max(highs)) if sl_level is not None else max(highs)
+        if channel_ctx.get("bounds"):
+            sl_level = max(sl_level, channel_ctx["bounds"]["upper"]) if sl_level is not None else channel_ctx["bounds"]["upper"]
+
+        if zones.get("demand", {}).get("zone"):
+            tp_candidates.append(zones["demand"]["zone"]["low"])
+        tp_candidates += [l for l in lows if l < entry]
+        if channel_ctx.get("bounds"):
+            tp_candidates.append(channel_ctx["bounds"]["lower"])
+
+    # Prefer structural targets, fallback to ATR
+    if direction == "BUY":
+        tp_candidates = [c for c in tp_candidates if c > entry]
+        tp1 = min(tp_candidates) if tp_candidates else entry + atr5
+        tp2 = max(tp_candidates) if tp_candidates else entry + atr5 * 1.5
+        tp3 = channel_ctx.get("bounds", {}).get("upper", tp2 + atr5)
+    else:
+        tp_candidates = [c for c in tp_candidates if c < entry]
+        tp1 = max(tp_candidates) if tp_candidates else entry - atr5
+        tp2 = min(tp_candidates) if tp_candidates else entry - atr5 * 1.5
+        tp3 = channel_ctx.get("bounds", {}).get("lower", tp2 - atr5)
+
+    sl, tps = _sanitize_levels(direction, entry, sl_level, [tp1, tp2, tp3], atr1h or atr5)
+    return sl, tps[0], tps[1], tps[2]
+
+
+def build_human_layer(df_5m, df_15m, df_1h, df_4h) -> Dict[str, Any]:
+    """Human-like analysis layer that never issues a trade decision."""
     last5 = df_5m.iloc[-1]
     last15 = df_15m.iloc[-1]
     last1h = df_1h.iloc[-1]
     last4h = df_4h.iloc[-1]
 
-    trend_5 = _trend(last5)
-    trend_15 = _trend(last15)
-    trend_1h = _trend(last1h)
-    trend_4h = _trend(last4h)
+    structure = {
+        "4H": _detect_structure(df_4h, lookback=140, window=3),
+        "1H": _detect_structure(df_1h, lookback=140, window=3),
+        "15m": _detect_structure(df_15m, lookback=120, window=2),
+        "5m": _detect_structure(df_5m, lookback=80, window=2),
+    }
+    sweeps = {
+        "15m": _liquidity_sweep(df_15m, lookback=30),
+        "5m": _liquidity_sweep(df_5m, lookback=20),
+    }
+    zones = _detect_zones(df_1h)
+    channels = _detect_channel_context(df_1h, float(last1h["close"]))
+    bos15 = _detect_bos_choch(df_15m, "15m")
+    bos5 = _detect_bos_choch(df_5m, "5m")
+    imbalances = _detect_imbalance(df_15m)
+    wick_bull, wick_bear = _wick_rejection(last15)
 
-    adx_conf, tier5, tier15, tier1h, tier4h = _compute_adx_conf(
-        float(last5.get("adx", 0)),
-        float(last15.get("adx", 0)),
-        float(last1h.get("adx", 0)),
-        float(last4h.get("adx", 0)),
+    master_direction = _final_direction(_trend(last4h), _trend(last1h))
+    explanation = _build_human_explanation(
+        structure,
+        sweeps,
+        zones,
+        channels,
+        bos15,
+        bos5,
+        imbalances,
+        {"bullish": wick_bull, "bearish": wick_bear},
+        master_direction,
     )
-    if adx_conf == "blocked":
-        return {
-            "action": "NO_TRADE",
-            "reason": "ADX below 20 blocks entry",
-            "signal_type": "GOLDEN",
-        }
-
-    status_msg = (
-        f"Trend 4H/1H/15m/5m: {trend_4h}/{trend_1h}/{trend_15}/{trend_5} | "
-        f"ADX5m={float(last5.get('adx',0)):.1f}, ADX15m={float(last15.get('adx',0)):.1f}"
-    )
-
-    if trend_4h != trend_1h or trend_1h != trend_15 or trend_15 != trend_5:
-        return {
-            "action": "NO_TRADE",
-            "reason": "Golden: trend mismatch across timeframes",
-            "market_status": status_msg,
-            "signal_type": "GOLDEN",
-        }
-
-    over_ext = abs(last5["close"] - last5["ema50"]) / last5["ema50"]
-    rsi_cross = detect_rsi_cross(df_5m.iloc[-2].get("rsi"), last5.get("rsi"))
-    macd_up = strong_macd_momentum(df_5m, "bullish")
-    macd_down = strong_macd_momentum(df_5m, "bearish")
-    emoji = _confidence_emoji(adx_conf)
-
-    if trend_5 == "bullish":
-        conds = [
-            rsi_cross == "bullish",
-            macd_up,
-            last5["stoch_k"] > last5["stoch_d"],
-            over_ext < 0.005,
-            last5["close"] >= last5["don_high"] * 0.999,
-        ]
-        if all(conds):
-            sl, tp = calculate_sl_tp(
-                last5["close"],
-                float(last5.get("atr", 0)),
-                "BUY",
-                sl_atr_mult=1.2,
-                tp_atr_mult=1.0,
-                sl_atr=float(last1h.get("atr", last5.get("atr", 0))),
-                sl_max_dist=25.0,
-                tp_max_dist=12.0,
-            )
-            return {
-                "action": "BUY",
-                "confidence": adx_conf,
-                "confidence_emoji": emoji,
-                "signal_type": "GOLDEN",
-                "entry": float(last5["close"]),
-                "sl": sl,
-                "tp": tp,
-                "timeframe": "5m",
-                "market_status": status_msg,
-            }
-
-    if trend_5 == "bearish":
-        conds = [
-            rsi_cross == "bearish",
-            macd_down,
-            last5["stoch_k"] < last5["stoch_d"],
-            over_ext < 0.005,
-            last5["close"] <= last5["don_low"],
-        ]
-        if all(conds):
-            sl, tp = calculate_sl_tp(
-                last5["close"],
-                float(last5.get("atr", 0)),
-                "SELL",
-                sl_atr_mult=1.2,
-                tp_atr_mult=1.0,
-                sl_atr=float(last1h.get("atr", last5.get("atr", 0))),
-                sl_max_dist=25.0,
-                tp_max_dist=12.0,
-            )
-            return {
-                "action": "SELL",
-                "confidence": adx_conf,
-                "confidence_emoji": emoji,
-                "signal_type": "GOLDEN",
-                "entry": float(last5["close"]),
-                "sl": sl,
-                "tp": tp,
-                "timeframe": "5m",
-                "market_status": status_msg,
-            }
 
     return {
         "action": "NO_TRADE",
-        "reason": "Golden: conditions not met",
-        "market_status": status_msg,
-        "signal_type": "GOLDEN",
+        "htf_direction": master_direction,
+        "structure": structure,
+        "liquidity_sweeps": sweeps,
+        "zones": zones,
+        "channels": channels,
+        "bos_choch": {"15m": bos15, "5m": bos5},
+        "imbalances": imbalances,
+        "wicks": {"bullish": wick_bull, "bearish": wick_bear},
+        "explanation": explanation,
     }
 
 
-# ---------------------------------------------------------------------------
-# ULTRA SIGNALS (isolated SMC-based system)
-# ---------------------------------------------------------------------------
-
-
-def check_ultra_entry(df_5m, df_15m, df_1h, df_4h):
-    """
-    Ultra SMC scalping engine (isolated). Does not modify other strategies.
-    """
-    # Basic safety
-    if min(len(df_5m), len(df_15m), len(df_1h), len(df_4h)) < 8:
-        return {
-            "action": "NO_TRADE",
-            "reason": "Not enough candles for ULTRA",
-            "signal_type": "ULTRA",
-            "market_status": "Insufficient data",
-        }
-
-    last5 = df_5m.iloc[-1]
-    last15 = df_15m.iloc[-1]
-    last1h = df_1h.iloc[-1]
-    last4h = df_4h.iloc[-1]
-    price = last5["close"]
-    adx5 = float(last5.get("adx", 0))
-    adx15 = float(last15.get("adx", 0))
-
-    # Trends (HTF alignment)
-    trend_1h = _trend(last1h)
-    trend_4h = _trend(last4h)
-    htf_bull = trend_1h == "bullish" and trend_4h == "bullish"
-    htf_bear = trend_1h == "bearish" and trend_4h == "bearish"
-
-    # Liquidity sweep detection (last 3-7 candles)
-    tail = df_5m.tail(7)
-    prev_range = tail.iloc[:-1] if len(tail) > 1 else tail
-    recent_high = prev_range["high"].max()
-    recent_low = prev_range["low"].min()
-
-    sweep = {"valid": False, "direction": None, "level": None, "strength": None}
-    wick_ratio = None
-    if len(tail) >= 3:
-        candle = tail.iloc[-1]
-        body_mid = (candle["open"] + candle["close"]) / 2
-        # BUY sweep: take out lows then close back above
-        if candle["low"] < recent_low and candle["close"] > recent_low and htf_bull:
-            sweep["valid"] = True
-            sweep["direction"] = "BUY"
-            sweep["level"] = float(recent_low)
-            sweep["strength"] = float(recent_low - candle["low"])
-            wick_ratio = (candle["low"] - min(candle["open"], candle["close"])) if body_mid else 0
-        # SELL sweep: take out highs then close back below
-        if candle["high"] > recent_high and candle["close"] < recent_high and htf_bear:
-            sweep["valid"] = True
-            sweep["direction"] = "SELL"
-            sweep["level"] = float(recent_high)
-            sweep["strength"] = float(candle["high"] - recent_high)
-            wick_ratio = (max(candle["open"], candle["close"]) - candle["high"]) if body_mid else 0
-
-    # Micro BOS (last 3-6 candles)
-    micro_bos = {"valid": False, "direction": None, "level": None}
-    if sweep["valid"]:
-        window = df_5m.tail(6).iloc[:-1] if len(df_5m) >= 6 else df_5m.iloc[:-1]
-        if sweep["direction"] == "BUY":
-            minor_high = window["high"].max() if len(window) else recent_high
-            if price > minor_high:
-                micro_bos = {"valid": True, "direction": "BUY", "level": float(minor_high)}
-        if sweep["direction"] == "SELL":
-            minor_low = window["low"].min() if len(window) else recent_low
-            if price < minor_low:
-                micro_bos = {"valid": True, "direction": "SELL", "level": float(minor_low)}
-
-    # Breaker block (last opposite candle before sweep)
-    breaker = {"valid": False, "direction": None}
-    if sweep["valid"]:
-        sweep_idx = df_5m.index[-1]
-        before_sweep = df_5m.iloc[:-1]
-        if sweep["direction"] == "BUY":
-            opp = before_sweep[before_sweep["close"] < before_sweep["open"]]
-            if not opp.empty:
-                last_bear = opp.iloc[-1]
-                if price > last_bear["high"]:
-                    breaker = {"valid": True, "direction": "BUY"}
-        if sweep["direction"] == "SELL":
-            opp = before_sweep[before_sweep["close"] > before_sweep["open"]]
-            if not opp.empty:
-                last_bull = opp.iloc[-1]
-                if price < last_bull["low"]:
-                    breaker = {"valid": True, "direction": "SELL"}
-
-    # Confluence scoring
-    score = 0
-    if sweep["valid"]:
-        score += 1
-    if micro_bos["valid"]:
-        score += 1
-    if breaker["valid"]:
-        score += 1
-    if adx5 >= 20:
-        score += 1
-
-    if score < 2:
-        return {
-            "action": "NO_TRADE",
-            "reason": "Insufficient ULTRA confluence",
-            "signal_type": "ULTRA",
-            "market_status": f"score={score}",
-            "analysis": {
-                "sweep": sweep,
-                "micro_bos": micro_bos,
-                "breaker": breaker,
-                "confluence_score": score,
-            },
-        }
-
-    confidence = "LOW"
-    if score == 3:
-        confidence = "MEDIUM"
-    if score == 4:
-        confidence = "HIGH"
-    confidence_emoji = "⭐⭐⭐" if confidence == "HIGH" else ("⭐⭐" if confidence == "MEDIUM" else "⭐")
-
-    # ADX and direction gating
-    if sweep["direction"] == "BUY" and not htf_bull:
-        return {"action": "NO_TRADE", "reason": "HTF trend not bullish", "signal_type": "ULTRA"}
-    if sweep["direction"] == "SELL" and not htf_bear:
-        return {"action": "NO_TRADE", "reason": "HTF trend not bearish", "signal_type": "ULTRA"}
-    if adx5 < 20:
-        return {"action": "NO_TRADE", "reason": "ADX5m < 20", "signal_type": "ULTRA"}
-
-    # SL/TP
-    fallback_sl = min(float(last1h.get("atr", 0)) * 1.2 if last1h.get("atr", 0) else 0, 25.0)
-    sweep_level = sweep.get("level", price)
-    if sweep["direction"] == "BUY":
-        sl = sweep_level if sweep_level else price - fallback_sl
-        sl = sl if sweep_level else price - fallback_sl
-        tp1 = df_5m["high"].tail(20).max()
-        tp2 = df_15m["high"].tail(20).max()
-        tp3 = max(df_1h["high"].tail(30).max(), df_4h["high"].tail(30).max())
-    else:
-        sl = sweep_level if sweep_level else price + fallback_sl
-        tp1 = df_5m["low"].tail(20).min()
-        tp2 = df_15m["low"].tail(20).min()
-        tp3 = min(df_1h["low"].tail(30).min(), df_4h["low"].tail(30).min())
-
-    # Fallback SL if sweep not set
-    if sweep_level is None:
-        sl = price - fallback_sl if sweep["direction"] == "BUY" else price + fallback_sl
-
-    return {
-        "action": sweep["direction"] if sweep["valid"] and micro_bos["valid"] and breaker["valid"] else "NO_TRADE",
-        "entry": float(price),
-        "sl": float(sl),
-        "tp1": float(tp1),
-        "tp2": float(tp2),
-        "tp3": float(tp3),
-        "confidence": confidence,
-        "confidence_emoji": confidence_emoji,
-        "signal_type": "ULTRA",
-        "market_status": f"score={score}, adx5={adx5:.1f}, adx15={adx15:.1f}",
-        "analysis": {
-            "sweep": sweep,
-            "micro_bos": micro_bos,
-            "breaker": breaker,
-            "confluence_score": score,
-        },
-    }
-
-
-# ---------------------------------------------------------------------------
-# ULTRA V3 (independent advanced scalping engine)
-# ---------------------------------------------------------------------------
-
-
-def check_ultra_v3(df_5m, df_15m, df_1h, df_4h):
-    """
-    Advanced SMC-based scalping engine (independent from other strategies).
-    """
-    if min(len(df_5m), len(df_15m), len(df_1h), len(df_4h)) < 10:
-        return {
-            "action": "NO_TRADE",
-            "reason": "Not enough candles for ULTRA_V3",
-            "signal_type": "ULTRA_V3",
-            "market_status": "Insufficient data",
-        }
-
+def run_scalp_layer(df_5m, df_15m, df_1h, df_4h, human_layer: Dict[str, Any]) -> Dict[str, Any]:
+    """Refined SCALP engine aligned to professional rules."""
     last5 = df_5m.iloc[-1]
     last15 = df_15m.iloc[-1]
     last1h = df_1h.iloc[-1]
     last4h = df_4h.iloc[-1]
     price = float(last5["close"])
 
-    # Helper: swing detection (simple 3-candle pattern)
-    def swings(df):
-        highs = (df["high"].shift(1) > df["high"].shift(2)) & (df["high"].shift(1) > df["high"])
-        lows = (df["low"].shift(1) < df["low"].shift(2)) & (df["low"].shift(1) < df["low"])
-        sh = [{"type": "high", "idx": df.index[i - 1], "price": float(df["high"].iloc[i - 1])} for i in range(2, len(df)) if highs.iloc[i]]
-        sl = [{"type": "low", "idx": df.index[i - 1], "price": float(df["low"].iloc[i - 1])} for i in range(2, len(df)) if lows.iloc[i]]
-        return sh, sl
-
-    def liquidity_map(df):
-        sh, sl = swings(df)
-        eq_tolerance = 0.0005
-        def equal_clusters(points):
-            pts = sorted(points, key=lambda x: x["price"])
-            clusters = []
-            for p in pts:
-                if not clusters or abs(clusters[-1][-1]["price"] - p["price"]) > eq_tolerance * max(1.0, p["price"]):
-                    clusters.append([p])
-                else:
-                    clusters[-1].append(p)
-            return [c for c in clusters if len(c) >= 2]
-        return {
-            "swing_highs": sh,
-            "swing_lows": sl,
-            "equal_highs": equal_clusters(sh),
-            "equal_lows": equal_clusters(sl),
-            "liq_above": [p["price"] for p in sh],
-            "liq_below": [p["price"] for p in sl],
-        }
-
-    liq_5 = liquidity_map(df_5m.tail(300))
-    liq_15 = liquidity_map(df_15m.tail(300))
-    liq_1h = liquidity_map(df_1h.tail(300))
-    liq_4h = liquidity_map(df_4h.tail(400))
-
-    # HTF trend alignment
-    trend_1h = _trend(last1h)
     trend_4h = _trend(last4h)
+    trend_1h = _trend(last1h)
     trend_15 = _trend(last15)
-    if not ((trend_1h == trend_4h == "bullish" and trend_15 != "bearish") or (trend_1h == trend_4h == "bearish" and trend_15 != "bullish")):
+    direction = _final_direction(trend_4h, trend_1h)
+
+    adx_conf, tier5, tier15, tier1h, tier4h = _compute_adx_conf(
+        _safe_float(last5.get("adx"), 0),
+        _safe_float(last15.get("adx"), 0),
+        _safe_float(last1h.get("adx"), 0),
+        _safe_float(last4h.get("adx"), 0),
+    )
+
+    if direction == "NO_TRADE":
         return {
             "action": "NO_TRADE",
-            "reason": "HTF trends not aligned for ULTRA_V3",
-            "signal_type": "ULTRA_V3",
-            "market_status": f"4H={trend_4h},1H={trend_1h},15m={trend_15}",
+            "reason": "HTF alignment missing",
+            "signal_type": "SCALP",
+            "trend": {"4h": trend_4h, "1h": trend_1h, "15m": trend_15},
         }
 
-    direction = "BUY" if trend_1h == "bullish" else "SELL"
-
-    # Sweep detection (last 3-7 candles)
-    tail = df_5m.tail(7)
-    sweep = {"valid": False, "level": None, "strength": None, "direction": None}
-    if len(tail) >= 3:
-        ref_high = tail.iloc[:-1]["high"].max()
-        ref_low = tail.iloc[:-1]["low"].min()
-        last_candle = tail.iloc[-1]
-        if direction == "BUY" and last_candle["low"] < ref_low and last_candle["close"] > ref_low:
-            sweep = {"valid": True, "level": float(ref_low), "strength": float(ref_low - last_candle["low"]), "direction": "BUY"}
-        if direction == "SELL" and last_candle["high"] > ref_high and last_candle["close"] < ref_high:
-            sweep = {"valid": True, "level": float(ref_high), "strength": float(last_candle["high"] - ref_high), "direction": "SELL"}
-    if not sweep["valid"]:
+    if trend_15 in ("bullish", "bearish") and (
+        (trend_15 == "bullish" and direction == "SELL") or (trend_15 == "bearish" and direction == "BUY")
+    ):
         return {
             "action": "NO_TRADE",
-            "reason": "No liquidity sweep",
-            "signal_type": "ULTRA_V3",
-            "market_status": "Sweep missing",
+            "reason": "15m cannot contradict HTF",
+            "signal_type": "SCALP",
+            "trend": {"4h": trend_4h, "1h": trend_1h, "15m": trend_15},
         }
 
-    # Micro CHOCH + BOS
-    micro_bos = {"valid": False, "direction": None, "level": None}
-    window = df_5m.tail(6).iloc[:-1]
-    if direction == "BUY":
-        minor_high = window["high"].max() if len(window) else tail["high"].max()
-        if price > minor_high:
-            micro_bos = {"valid": True, "direction": "BUY", "level": float(minor_high)}
-    else:
-        minor_low = window["low"].min() if len(window) else tail["low"].min()
-        if price < minor_low:
-            micro_bos = {"valid": True, "direction": "SELL", "level": float(minor_low)}
-    if not micro_bos["valid"]:
-        return {
-            "action": "NO_TRADE",
-            "reason": "CHOCH/BOS missing",
-            "signal_type": "ULTRA_V3",
-            "market_status": "Micro BOS missing",
-        }
+    sweep5 = _liquidity_sweep(df_5m, lookback=20)
+    bos5 = human_layer.get("bos_choch", {}).get("5m", {})
+    bos15 = human_layer.get("bos_choch", {}).get("15m", {})
+    channel_ctx = _detect_channel_context(df_5m, price)
+    zones = human_layer.get("zones", _detect_zones(df_1h))
+    atr5 = _safe_float(last5.get("atr"), price * 0.003) or price * 0.003
+    atr1h = _safe_float(last1h.get("atr"), atr5) or atr5
 
-    # Refined order block (last opposite candle before sweep)
-    ob = {"valid": False, "direction": None, "low": None, "high": None}
-    pre_sweep = df_5m.iloc[:-1]
-    if direction == "BUY":
-        opp = pre_sweep[pre_sweep["close"] < pre_sweep["open"]]
-        if not opp.empty:
-            last_opp = opp.iloc[-1]
-            if price > last_opp["high"]:
-                span = last_opp["high"] - last_opp["low"]
-                ob_low = last_opp["low"] + span * (1 / 3)
-                ob_high = last_opp["high"] - span * (1 / 3)
-                ob = {"valid": True, "direction": "BUY", "low": float(ob_low), "high": float(ob_high)}
-    else:
-        opp = pre_sweep[pre_sweep["close"] > pre_sweep["open"]]
-        if not opp.empty:
-            last_opp = opp.iloc[-1]
-            if price < last_opp["low"]:
-                span = last_opp["high"] - last_opp["low"]
-                ob_low = last_opp["low"] + span * (1 / 3)
-                ob_high = last_opp["high"] - span * (1 / 3)
-                ob = {"valid": True, "direction": "SELL", "low": float(ob_low), "high": float(ob_high)}
-    if not ob["valid"]:
-        return {
-            "action": "NO_TRADE",
-            "reason": "Refined OB invalid",
-            "signal_type": "ULTRA_V3",
-            "market_status": "OB invalid",
-        }
+    sl, tp1, tp2, tp3 = _build_levels(direction, price, df_5m, df_15m, df_1h, zones, channel_ctx, atr5, atr1h)
 
-    # FVG alignment (optional)
-    fvg = {"overlap_ob": False}
-    if len(df_5m) >= 3:
-        highs = df_5m["high"]
-        lows = df_5m["low"]
-        for i in range(len(df_5m) - 2, len(df_5m)):
-            if i < 2:
-                continue
-            if direction == "BUY" and lows.iloc[i] > highs.iloc[i - 2]:
-                if ob["low"] <= lows.iloc[i] <= ob["high"]:
-                    fvg["overlap_ob"] = True
-            if direction == "SELL" and highs.iloc[i] < lows.iloc[i - 2]:
-                if ob["low"] <= highs.iloc[i] <= ob["high"]:
-                    fvg["overlap_ob"] = True
+    wick_bull, wick_bear = _wick_rejection(last5)
+    wick_ok = (wick_bull and direction == "BUY") or (wick_bear and direction == "SELL")
+    sweep_ok = (sweep5.get("type") == "below" and direction == "BUY") or (sweep5.get("type") == "above" and direction == "SELL")
+    bos_ok = (bos5.get("direction") == ("bullish" if direction == "BUY" else "bearish")) or (
+        bos15.get("direction") == ("bullish" if direction == "BUY" else "bearish")
+    )
+    channel_ok = (channel_ctx.get("tap") == "support" and direction == "BUY") or (
+        channel_ctx.get("tap") == "resistance" and direction == "SELL"
+    )
+    zone_conf = zones.get("demand", {}).get("confidence", 0) if direction == "BUY" else zones.get("supply", {}).get("confidence", 0)
 
-    # ADX confidence (not blocker)
-    adx_info = {
-        "adx5": float(last5.get("adx", 0)),
-        "adx15": float(last15.get("adx", 0)),
-        "adx1h": float(last1h.get("adx", 0)),
+    score_ctx = {
+        "htf_alignment": True,
+        "zones": zone_conf >= 50,
+        "liquidity": sweep_ok,
+        "channels": channel_ok,
+        "bos": bos_ok,
+        "wick": wick_ok,
+        "momentum": adx_conf != "blocked",
     }
-    adx_score = 0
-    if adx_info["adx5"] >= 20:
-        adx_score += 1
-    if adx_info["adx15"] >= 22:
-        adx_score += 1
-    if adx_info["adx1h"] >= 25:
-        adx_score += 1
+    score, breakdown = _score_trade(score_ctx)
 
-    # Confluence score 0-6
-    score = 0
-    if sweep["valid"]:
-        score += 1
-    if micro_bos["valid"]:
-        score += 1
-    if ob["valid"]:
-        score += 1
-    if fvg["overlap_ob"]:
-        score += 1
-    score += adx_score
+    action = direction if score >= 60 else "NO_TRADE"
+    confidence = float(min(100, max(60, score))) if action != "NO_TRADE" else float(min(score, 60))
 
-    if score < 2:
-        return {"action": "NO_TRADE", "reason": "Low score", "signal_type": "ULTRA_V3", "market_status": f"score={score}"}
-
-    if score >= 6:
-        confidence = "HIGH"
-    elif score >= 4:
-        confidence = "MEDIUM"
-    else:
-        confidence = "LOW"
-    conf_emoji = "⭐⭐⭐" if confidence == "HIGH" else ("⭐⭐" if confidence == "MEDIUM" else "⭐")
-
-    # Entry triggers: allow if price within OB or retesting micro levels
-    entry_ok = False
-    if direction == "BUY":
-        if ob["low"] <= price <= ob["high"]:
-            entry_ok = True
-        if price >= micro_bos["level"]:
-            entry_ok = True
-    else:
-        if ob["low"] <= price <= ob["high"]:
-            entry_ok = True
-        if price <= micro_bos["level"]:
-            entry_ok = True
-    if not entry_ok:
-        return {"action": "NO_TRADE", "reason": "No entry trigger", "signal_type": "ULTRA_V3", "market_status": f"score={score}"}
-
-    # SL based on protected liquidity
-    buffer = 0.05
-    if direction == "BUY":
-        sl_raw = min(sweep["level"], ob["low"]) - buffer
-    else:
-        sl_raw = max(sweep["level"], ob["high"]) + buffer
-    fallback_sl = min(float(last1h.get("atr", 0)) * 1.2 if last1h.get("atr", 0) else 0, 25.0)
-    sl = sl_raw if sl_raw is not None else (price - fallback_sl if direction == "BUY" else price + fallback_sl)
-
-    # TP levels via nearest liquidity
-    if direction == "BUY":
-        tp1 = max(liq_5["liq_above"]) if liq_5["liq_above"] else price
-        tp2 = max(liq_15["liq_above"]) if liq_15["liq_above"] else tp1
-        tp3 = max(liq_1h["liq_above"]) if liq_1h["liq_above"] else tp2
-        tp4 = max(liq_4h["liq_above"]) if liq_4h["liq_above"] else tp3
-    else:
-        tp1 = min(liq_5["liq_below"]) if liq_5["liq_below"] else price
-        tp2 = min(liq_15["liq_below"]) if liq_15["liq_below"] else tp1
-        tp3 = min(liq_1h["liq_below"]) if liq_1h["liq_below"] else tp2
-        tp4 = min(liq_4h["liq_below"]) if liq_4h["liq_below"] else tp3
-
-    result = {
-        "action": direction,
-        "signal_type": "ULTRA_V3",
+    return {
+        "action": action,
         "entry": round(price, 2),
-        "sl": round(sl, 2),
-        "tp1": round(tp1, 2),
-        "tp2": round(tp2, 2),
-        "tp3": round(tp3, 2),
-        "tp4": round(tp4, 2),
+        "sl": sl,
+        "tp": tp1,
+        "tp1": tp1,
+        "tp2": tp2,
+        "tp3": tp3,
         "confidence": confidence,
-        "confidence_emoji": conf_emoji,
-        "market_status": f"HTF {direction} | sweep {sweep['valid']} | BOS {micro_bos['valid']} | score {score}",
-        "analysis": {
-            "sweep": sweep,
-            "micro_bos": micro_bos,
-            "order_block": ob,
-            "fvg": fvg,
-            "adx": adx_info,
-            "liquidity": {
-                "m5": liq_5,
-                "m15": liq_15,
-                "h1": liq_1h,
-                "h4": liq_4h,
-            },
-            "score": score,
-        },
+        "score": score,
+        "score_breakdown": breakdown,
+        "signal_type": "SCALP",
+        "trend": {"4h": trend_4h, "1h": trend_1h, "15m": trend_15},
+        "reasoning": human_layer.get("explanation", []),
+        "adx_conf": adx_conf,
     }
-    return result
 
 
+def run_ultra_layer(df_5m, df_15m, df_1h, df_4h, human_layer: Dict[str, Any]) -> Dict[str, Any]:
+    """ULTRA layer wrapped to respect new stability + direction rules."""
+    last5 = df_5m.iloc[-1]
+    last15 = df_15m.iloc[-1]
+    last1h = df_1h.iloc[-1]
+    last4h = df_4h.iloc[-1]
+    price = float(last5["close"])
+
+    trend_4h = _trend(last4h)
+    trend_1h = _trend(last1h)
+    direction = _final_direction(trend_4h, trend_1h)
+    if direction == "NO_TRADE":
+        return {"action": "NO_TRADE", "reason": "HTF not aligned", "signal_type": "ULTRA"}
+
+    sweep = _liquidity_sweep(df_5m, lookback=20)
+    bos = _detect_bos_choch(df_5m, "5m")
+    wick_bull, wick_bear = _wick_rejection(last5)
+    wick_ok = (wick_bull and direction == "BUY") or (wick_bear and direction == "SELL")
+
+    zones = human_layer.get("zones", _detect_zones(df_1h))
+    channel_ctx = _detect_channel_context(df_5m, price)
+    atr5 = _safe_float(last5.get("atr"), price * 0.003) or price * 0.003
+    atr1h = _safe_float(last1h.get("atr"), atr5) or atr5
+    sl, tp1, tp2, tp3 = _build_levels(direction, price, df_5m, df_15m, df_1h, zones, channel_ctx, atr5, atr1h)
+
+    bos_ok = bos.get("direction") == ("bullish" if direction == "BUY" else "bearish")
+    sweep_ok = (sweep.get("type") == "below" and direction == "BUY") or (sweep.get("type") == "above" and direction == "SELL")
+    channel_ok = (channel_ctx.get("tap") == "support" and direction == "BUY") or (channel_ctx.get("tap") == "resistance" and direction == "SELL")
+    zone_conf = zones.get("demand", {}).get("confidence", 0) if direction == "BUY" else zones.get("supply", {}).get("confidence", 0)
+
+    score_ctx = {
+        "htf_alignment": True,
+        "zones": zone_conf >= 50,
+        "liquidity": sweep_ok,
+        "channels": channel_ok,
+        "bos": bos_ok,
+        "wick": wick_ok,
+        "momentum": _safe_float(last5.get("adx"), 0) >= 20 and _safe_float(last15.get("adx"), 0) >= 20,
+    }
+    score, breakdown = _score_trade(score_ctx)
+    action = direction if score >= 60 else "NO_TRADE"
+    confidence = float(min(100, max(60, score))) if action != "NO_TRADE" else float(min(score, 60))
+
+    return {
+        "action": action,
+        "entry": round(price, 2),
+        "sl": sl,
+        "tp": tp1,
+        "tp1": tp1,
+        "tp2": tp2,
+        "tp3": tp3,
+        "confidence": confidence,
+        "score": score,
+        "score_breakdown": breakdown,
+        "signal_type": "ULTRA",
+        "trend": {"4h": trend_4h, "1h": trend_1h},
+        "reasoning": human_layer.get("explanation", []),
+    }
+
+
+def run_ultra_v3_layer(df_5m, df_15m, df_1h, df_4h, human_layer: Dict[str, Any]) -> Dict[str, Any]:
+    """ULTRA V3 layer – stricter version, but still aligned to HTF rules."""
+    last5 = df_5m.iloc[-1]
+    last15 = df_15m.iloc[-1]
+    last1h = df_1h.iloc[-1]
+    last4h = df_4h.iloc[-1]
+    price = float(last5["close"])
+
+    trend_4h = _trend(last4h)
+    trend_1h = _trend(last1h)
+    trend_15 = _trend(last15)
+    direction = _final_direction(trend_4h, trend_1h)
+    if direction == "NO_TRADE":
+        return {"action": "NO_TRADE", "reason": "HTF not aligned", "signal_type": "ULTRA_V3"}
+    if trend_15 in ("bullish", "bearish") and (
+        (trend_15 == "bullish" and direction == "SELL") or (trend_15 == "bearish" and direction == "BUY")
+    ):
+        return {"action": "NO_TRADE", "reason": "15m confirm failed", "signal_type": "ULTRA_V3"}
+
+    sweep = _liquidity_sweep(df_5m, lookback=18)
+    bos = _detect_bos_choch(df_5m, "5m")
+    bos15 = _detect_bos_choch(df_15m, "15m")
+    wick_bull, wick_bear = _wick_rejection(last5)
+    wick_ok = (wick_bull and direction == "BUY") or (wick_bear and direction == "SELL")
+
+    zones = human_layer.get("zones", _detect_zones(df_1h))
+    channel_ctx = _detect_channel_context(df_5m, price)
+    atr5 = _safe_float(last5.get("atr"), price * 0.003) or price * 0.003
+    atr1h = _safe_float(last1h.get("atr"), atr5) or atr5
+    sl, tp1, tp2, tp3 = _build_levels(direction, price, df_5m, df_15m, df_1h, zones, channel_ctx, atr5, atr1h)
+
+    bos_ok = (bos.get("direction") == ("bullish" if direction == "BUY" else "bearish")) or (
+        bos15.get("direction") == ("bullish" if direction == "BUY" else "bearish")
+    )
+    sweep_ok = (sweep.get("type") == "below" and direction == "BUY") or (sweep.get("type") == "above" and direction == "SELL")
+    channel_ok = (channel_ctx.get("tap") == "support" and direction == "BUY") or (channel_ctx.get("tap") == "resistance" and direction == "SELL")
+    zone_conf = zones.get("demand", {}).get("confidence", 0) if direction == "BUY" else zones.get("supply", {}).get("confidence", 0)
+
+    score_ctx = {
+        "htf_alignment": True,
+        "zones": zone_conf >= 50,
+        "liquidity": sweep_ok,
+        "channels": channel_ok,
+        "bos": bos_ok,
+        "wick": wick_ok,
+        "momentum": _safe_float(last5.get("adx"), 0) >= 20 and _safe_float(last15.get("adx"), 0) >= 20,
+    }
+    score, breakdown = _score_trade(score_ctx)
+    action = direction if score >= 60 else "NO_TRADE"
+    confidence = float(min(100, max(60, score))) if action != "NO_TRADE" else float(min(score, 60))
+
+    return {
+        "action": action,
+        "entry": round(price, 2),
+        "sl": sl,
+        "tp": tp1,
+        "tp1": tp1,
+        "tp2": tp2,
+        "tp3": tp3,
+        "confidence": confidence,
+        "score": score,
+        "score_breakdown": breakdown,
+        "signal_type": "ULTRA_V3",
+        "trend": {"4h": trend_4h, "1h": trend_1h, "15m": trend_15},
+        "reasoning": human_layer.get("explanation", []),
+    }
+
+
+def consolidate_signals(
+    human_layer: Dict[str, Any],
+    scalp_layer: Dict[str, Any],
+    ultra_layer: Dict[str, Any],
+    v3_layer: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Merge layers and emit a single stable decision."""
+    master_direction = human_layer.get("htf_direction", "NO_TRADE")
+    candidates = []
+    for name, layer in (("SCALP", scalp_layer), ("ULTRA_V3", v3_layer), ("ULTRA", ultra_layer)):
+        action = _sanitize_action(layer.get("action"))
+        if action not in ("BUY", "SELL"):
+            continue
+        if master_direction != "NO_TRADE" and action != master_direction:
+            continue
+        score = layer.get("score", 0)
+        confidence = _safe_float(layer.get("confidence"), 0) or 0
+        candidates.append(
+            {"name": name, "score": score, "confidence": confidence, "payload": layer, "action": action}
+        )
+
+    if not candidates:
+        return {
+            "action": "NO_TRADE",
+            "reason": "No aligned signals after consolidation",
+            "signal_type": "UNIFIED",
+            "htf_direction": master_direction,
+            "layers": {"human": human_layer, "scalp": scalp_layer, "ultra": ultra_layer, "ultra_v3": v3_layer},
+        }
+
+    best = sorted(candidates, key=lambda x: (x["score"], x["confidence"]), reverse=True)[0]
+    final = dict(best["payload"])
+    final["action"] = best["action"]
+    final["signal_type"] = "UNIFIED"
+    final["htf_direction"] = master_direction
+    final["score"] = best["score"]
+    final["confidence"] = best["confidence"] if final["action"] != "NO_TRADE" else best["confidence"]
+    final["human_summary"] = human_layer.get("explanation", [])
+
+    entry = _safe_float(final.get("entry"), None)
+    if final["action"] in ("BUY", "SELL") and entry is not None:
+        if _should_block_duplicate(entry, final["action"]):
+            return {
+                "action": "NO_TRADE",
+                "reason": "Stability layer blocked duplicate entry",
+                "signal_type": "UNIFIED",
+                "htf_direction": master_direction,
+                "layers": {"human": human_layer, "scalp": scalp_layer, "ultra": ultra_layer, "ultra_v3": v3_layer},
+            }
+        _record_signal(entry, final["action"])
+    final["layers"] = {"human": human_layer, "scalp": scalp_layer, "ultra": ultra_layer, "ultra_v3": v3_layer}
+    return final
+
+
+def check_entry(df_5m, df_15m, df_1h, df_4h):
+    """Unified entry point combining human layer + scalp + ultra stacks."""
+    human_layer = build_human_layer(df_5m, df_15m, df_1h, df_4h)
+    scalp_layer = run_scalp_layer(df_5m, df_15m, df_1h, df_4h, human_layer)
+    ultra_layer = run_ultra_layer(df_5m, df_15m, df_1h, df_4h, human_layer)
+    v3_layer = run_ultra_v3_layer(df_5m, df_15m, df_1h, df_4h, human_layer)
+    return consolidate_signals(human_layer, scalp_layer, ultra_layer, v3_layer)
+
+
+def check_ultra_entry(df_5m, df_15m, df_1h, df_4h):
+    """Compatibility wrapper for legacy callers."""
+    human_layer = build_human_layer(df_5m, df_15m, df_1h, df_4h)
+    return run_ultra_layer(df_5m, df_15m, df_1h, df_4h, human_layer)
+
+
+def check_ultra_v3(df_5m, df_15m, df_1h, df_4h):
+    """Compatibility wrapper for legacy callers."""
+    human_layer = build_human_layer(df_5m, df_15m, df_1h, df_4h)
+    return run_ultra_v3_layer(df_5m, df_15m, df_1h, df_4h, human_layer)
