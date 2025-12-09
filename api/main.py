@@ -122,35 +122,30 @@ def run_signal():
         _save_last_signal(unified)
 
         if unified.get("action") in ("BUY", "SELL") and TG_TOKEN and TG_CHAT:
-            action_icon = "🚀" if unified["action"] == "BUY" else "🛑"
+            action_icon = "BUY" if unified["action"] == "BUY" else "SELL"
             confidence = unified.get("confidence")
             stars = ""
             try:
                 if confidence is not None:
                     c_val = float(confidence)
                     stars_count = 3 if c_val >= 85 else 2 if c_val >= 70 else 1
-                    stars = " " + "⭐" * stars_count
+                    stars = " " + ("*" * stars_count)
             except Exception:
                 stars = ""
 
-            tp_emoji = {"tp1": "🥇", "tp2": "🥈", "tp3": "🥉"}
             tp_lines = []
             for key in ("tp1", "tp2", "tp3"):
                 val = unified.get(key)
                 if val is not None:
-                    tp_lines.append(f"{tp_emoji.get(key, '🎯')} {key.upper()}: {val}")
-            tp_text = "\n".join(tp_lines) if tp_lines else "🎯 TP: n/a"
+                    tp_lines.append(f"{key.upper()}: {val}")
+            tp_text = "\n".join(tp_lines) if tp_lines else "TP: n/a"
 
             msg = (
-                f"<b><span style='font-size:18px;'>════════════════════════════</span></b>\n"
-                f"<b><span style='font-size:20px;'>{action_icon} {unified['action']} XAUUSD {stars}</span></b>\n"
-                f"<b><span style='font-size:18px;'>────────────────────────────</span></b>\n"
-                f"💰 <b><span style='font-size:18px;'>Entry:</span></b> <span style='font-size:18px;'>{unified.get('entry')}</span>\n"
-                f"⛔ <b><span style='font-size:18px;'>Stop Loss:</span></b> <span style='font-size:18px;'>{unified.get('sl')}</span>\n"
-                f"{tp_text}"
-                f"<b><span style='font-size:18px;'>────────────────────────────</span></b>\n"
-                f"🕒 <b><span style='font-size:18px;'>Timeframes:</span></b> <span style='font-size:18px;'>5m • 15m • 1H • 4H</span>\n"
-                f"<b><span style='font-size:18px;'>════════════════════════════</span></b>"
+                f"{action_icon} XAUUSD{stars}\n"
+                f"Entry: {unified.get('entry')}\n"
+                f"Stop Loss: {unified.get('sl')}\n"
+                f"{tp_text}\n"
+                "Timeframes: 5m > 15m > 1H > 4H"
             )
 
             send_telegram(TG_TOKEN, TG_CHAT, msg)
