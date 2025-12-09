@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
+import requests
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 
@@ -16,6 +17,7 @@ app = FastAPI()
 
 TG_TOKEN = os.getenv("TG_TOKEN")
 TG_CHAT = os.getenv("TG_CHAT")
+FORWARD_CHANNEL_ID = -1002938646549
 DATA_DIR = Path("data")
 LAST_SIGNAL_FILE = DATA_DIR / "last_signal.json"
 DATA_DIR.mkdir(exist_ok=True)
@@ -44,6 +46,43 @@ def _fallback_history() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.Da
     candles_1h = hist.resample("60min").agg({"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}).dropna()
     candles_4h = hist.resample("240min").agg({"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}).dropna()
     return candles_5m, candles_15m, candles_1h, candles_4h
+
+
+def forward_to_channel(update: dict) -> None:
+    """
+    Forward any incoming Telegram message to the configured broadcast channel.
+    Uses forwardMessage so media and formatting stay intact.
+    """
+    if not TG_TOKEN:
+        return
+
+    try:
+        message = None
+        for key in ("message", "edited_message", "channel_post", "edited_channel_post"):
+            if key in update and update.get(key):
+                message = update[key]
+                break
+
+        if not message:
+            return
+
+        from_chat_id = message.get("chat", {}).get("id")
+        message_id = message.get("message_id")
+
+        if from_chat_id is None or message_id is None:
+            return
+
+        if from_chat_id == FORWARD_CHANNEL_ID:
+            return
+
+        url = f"https://api.telegram.org/bot{TG_TOKEN}/forwardMessage"
+        payload = {"chat_id": FORWARD_CHANNEL_ID, "from_chat_id": from_chat_id, "message_id": message_id}
+        requests.post(url, json=payload, timeout=10)
+    except Exception:
+        try:
+            print("Warning: failed to forward Telegram update")
+        except Exception:
+            pass
 
 
 @app.get("/")
@@ -157,3 +196,9 @@ def run_signal():
         return JSONResponse(status_code=200, content={"status": "waiting", "detail": str(e)})
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/telegram/update")
+async def telegram_update(update: dict):
+    forward_to_channel(update)
+    return {"ok": True}
