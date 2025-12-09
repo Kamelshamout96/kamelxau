@@ -105,7 +105,7 @@ def run_signal():
 
         unified = validate_direction_consistency(unified)
 
-        # Duplicate guard: block re-emitting same action within ±2 USD of last entry
+        # Duplicate guard: block re-emitting same action within 2 USD of last entry
         last_sig = _load_last_signal()
         try:
             if (
@@ -115,7 +115,7 @@ def run_signal():
                 and unified.get("entry") is not None
             ):
                 if abs(float(unified["entry"]) - float(last_sig["entry"])) <= 2.0:
-                    return {"status": "duplicate_blocked", "detail": "entry within ±2 USD of last signal", "last": last_sig}
+                    return {"status": "duplicate_blocked", "detail": "entry within 2 USD of last signal", "last": last_sig}
         except Exception:
             pass
 
@@ -129,7 +129,7 @@ def run_signal():
                 if confidence is not None:
                     c_val = float(confidence)
                     stars_count = 3 if c_val >= 85 else 2 if c_val >= 70 else 1
-                    stars = " " + ("*" * stars_count)
+                    stars = " " + ("⭐" * stars_count)
             except Exception:
                 stars = ""
 
@@ -138,14 +138,15 @@ def run_signal():
                 val = unified.get(key)
                 if val is not None:
                     tp_lines.append(f"{key.upper()}: {val}")
-            tp_text = "\n".join(tp_lines) if tp_lines else "TP: n/a"
+            tp_text = "<br>".join(tp_lines) if tp_lines else "TP: n/a"
 
+            side_icon = "🟢" if unified["action"] == "BUY" else "🔴"
             msg = (
-                f"{action_icon} XAUUSD{stars}\n"
-                f"Entry: {unified.get('entry')}\n"
-                f"Stop Loss: {unified.get('sl')}\n"
-                f"{tp_text}\n"
-                "Timeframes: 5m > 15m > 1H > 4H"
+                f"<b>{side_icon} {action_icon} XAUUSD</b>{stars}<br>"
+                f"💰 <b>Entry:</b> {unified.get('entry')}<br>"
+                f"🛑 <b>Stop Loss:</b> {unified.get('sl')}<br>"
+                f"{tp_text}<br>"
+                "🕒 <b>Timeframes:</b> 5m > 15m > 1H > 4H"
             )
 
             send_telegram(TG_TOKEN, TG_CHAT, msg)
