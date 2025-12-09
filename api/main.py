@@ -2,6 +2,7 @@ import json
 import os
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 import requests
@@ -48,7 +49,7 @@ def _fallback_history() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.Da
     return candles_5m, candles_15m, candles_1h, candles_4h
 
 
-def forward_to_channel(update: dict) -> None:
+def forward_to_channel(update: Any) -> None:
     """
     Forward any incoming Telegram message to the configured broadcast channel.
     Uses forwardMessage so media and formatting stay intact.
@@ -57,27 +58,45 @@ def forward_to_channel(update: dict) -> None:
         return
 
     try:
-        message = None
-        for key in ("message", "edited_message", "channel_post", "edited_channel_post"):
-            if key in update and update.get(key):
-                message = update[key]
-                break
+        # Handle both single-update payloads and bulk getUpdates-style payloads
+        updates = []
+        if isinstance(update, list):
+            updates = update
+        elif isinstance(update, dict) and isinstance(update.get("result"), list):
+            updates = update.get("result", [])
+        else:
+            updates = [update]
 
-        if not message:
-            return
+        for upd in updates:
+            message = None
+            for key in ("message", "edited_message", "channel_post", "edited_channel_post"):
+                if key in upd and upd.get(key):
+                    message = upd[key]
+                    break
 
-        from_chat_id = message.get("chat", {}).get("id")
-        message_id = message.get("message_id")
+            if not message:
+                continue
 
-        if from_chat_id is None or message_id is None:
-            return
+            from_chat_id = message.get("chat", {}).get("id")
+            message_id = message.get("message_id")
 
-        if from_chat_id == FORWARD_CHANNEL_ID:
-            return
+            if from_chat_id is None or message_id is None:
+                continue
 
-        url = f"https://api.telegram.org/bot{TG_TOKEN}/forwardMessage"
-        payload = {"chat_id": FORWARD_CHANNEL_ID, "from_chat_id": from_chat_id, "message_id": message_id}
-        requests.post(url, json=payload, timeout=10)
+            if from_chat_id == FORWARD_CHANNEL_ID:
+                continue
+
+            url = f"https://api.telegram.org/bot{TG_TOKEN}/forwardMessage"
+            payload = {"chat_id": FORWARD_CHANNEL_ID, "from_chat_id": from_chat_id, "message_id": message_id}
+            try:
+                resp = requests.post(url, json=payload, timeout=10)
+                if resp.status_code >= 400:
+                    try:
+                        print(f"Warning: forwardMessage failed ({resp.status_code}): {resp.text}")
+                    except Exception:
+                        pass
+            except Exception:
+                continue
     except Exception:
         try:
             print("Warning: failed to forward Telegram update")
@@ -199,6 +218,6 @@ def run_signal():
 
 
 @app.post("/telegram/update")
-async def telegram_update(update: dict):
+async def telegram_update(update: Any):
     forward_to_channel(update)
     return {"ok": True}
