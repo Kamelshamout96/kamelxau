@@ -404,28 +404,62 @@ def _sanitize_levels(
     entry: float,
     sl: Optional[float],
     tps: List[Optional[float]],
-    atr_fallback: float,
+    atr1h: float,
+    atr5: float,
 ) -> Tuple[float, List[float]]:
     """Ensure SL/TP respect BUY/SELL geometry and sanitize NaN/None."""
     action = _sanitize_action(action)
     entry = float(entry)
-    min_move = atr_fallback if atr_fallback and atr_fallback > 0 else max(entry * 0.001, 0.5)
+    fallback = max(entry * 0.001, 0.5)
+    atr1h_val = _safe_float(atr1h, None)
+    atr5_val = _safe_float(atr5, None)
+    ref_sl_atr = atr1h_val if atr1h_val and atr1h_val > 0 else (atr5_val if atr5_val and atr5_val > 0 else fallback)
+    ref_tp_atr = atr5_val if atr5_val and atr5_val > 0 else fallback
+
+    min_sl_dist = max(ref_sl_atr * 0.8, 2.5)
+    max_sl_dist = max(min_sl_dist, min(ref_sl_atr * 2.0, 15.0))
+    min_tp_dist = min(ref_tp_atr * 0.8, 2.5)
+
     if action == "BUY":
-        safe_sl = sl if sl is not None and sl < entry else entry - min_move
-        safe_tps = []
+        candidate_sl = _safe_float(sl)
+        if candidate_sl is None or candidate_sl >= entry:
+            candidate_sl = entry - min_sl_dist
+        sl_dist = entry - candidate_sl
+        sl_dist = min(max(sl_dist, min_sl_dist), max_sl_dist)
+        safe_sl = entry - sl_dist
+
+        raw_tps = []
         for tp in tps:
             tp_val = _safe_float(tp)
             if tp_val is None or tp_val <= entry:
-                tp_val = entry + min_move
-            safe_tps.append(tp_val)
+                tp_val = entry + min_tp_dist
+            raw_tps.append(tp_val)
+        while len(raw_tps) < 3:
+            raw_tps.append(entry + min_tp_dist)
+        tp1 = max(raw_tps[0], entry + min_tp_dist)
+        tp2 = max(raw_tps[1], tp1 + 2)
+        tp3 = max(raw_tps[2], tp2 + 2)
+        safe_tps = [tp1, tp2, tp3]
     else:
-        safe_sl = sl if sl is not None and sl > entry else entry + min_move
-        safe_tps = []
+        candidate_sl = _safe_float(sl)
+        if candidate_sl is None or candidate_sl <= entry:
+            candidate_sl = entry + min_sl_dist
+        sl_dist = candidate_sl - entry
+        sl_dist = min(max(sl_dist, min_sl_dist), max_sl_dist)
+        safe_sl = entry + sl_dist
+
+        raw_tps = []
         for tp in tps:
             tp_val = _safe_float(tp)
             if tp_val is None or tp_val >= entry:
-                tp_val = entry - min_move
-            safe_tps.append(tp_val)
+                tp_val = entry - min_tp_dist
+            raw_tps.append(tp_val)
+        while len(raw_tps) < 3:
+            raw_tps.append(entry - min_tp_dist)
+        tp1 = min(raw_tps[0], entry - min_tp_dist)
+        tp2 = min(raw_tps[1], tp1 - 2)
+        tp3 = min(raw_tps[2], tp2 - 2)
+        safe_tps = [tp1, tp2, tp3]
     safe_tps = _order_tps(action, [round(float(tp), 2) for tp in safe_tps])
     return round(float(safe_sl), 2), safe_tps
 
@@ -524,7 +558,7 @@ def _build_levels(
         tp2 = min(tp_candidates) if tp_candidates else entry - atr5 * 1.5
         tp3 = channel_ctx.get("bounds", {}).get("lower", tp2 - atr5)
 
-    sl, tps = _sanitize_levels(direction, entry, sl_level, [tp1, tp2, tp3], atr1h or atr5)
+    sl, tps = _sanitize_levels(direction, entry, sl_level, [tp1, tp2, tp3], atr1h, atr5)
     return sl, tps[0], tps[1], tps[2]
 
 
