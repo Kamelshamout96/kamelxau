@@ -138,15 +138,15 @@ def run_signal():
                 val = unified.get(key)
                 if val is not None:
                     tp_lines.append(f"{key.upper()}: {val}")
-            tp_text = "<br>".join(tp_lines) if tp_lines else "TP: n/a"
+            tp_text = "\n".join(tp_lines) if tp_lines else "TP: n/a"
 
             side_icon = "🟢" if unified["action"] == "BUY" else "🔴"
             msg = (
-                f"<b>{side_icon} {action_icon} XAUUSD</b>{stars}<br>"
-                f"💰 <b>Entry:</b> {unified.get('entry')}<br>"
-                f"🛑 <b>Stop Loss:</b> {unified.get('sl')}<br>"
-                f"{tp_text}<br>"
-                "🕒 <b>Timeframes:</b> 5m > 15m > 1H > 4H"
+                f"{side_icon} {action_icon} XAUUSD {stars} \n"
+                f"💰 Entry: {unified.get('entry')} \n"
+                f"🛑 Stop Loss: {unified.get('sl')} \n"
+                f"{tp_text} \n"
+                "🕒 Timeframes: 5m > 15m > 1H > 4H"
             )
 
             send_telegram(TG_TOKEN, TG_CHAT, msg)
