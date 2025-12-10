@@ -170,6 +170,53 @@ def build_timeframe_candles(df_1m: pd.DataFrame, timeframe: str) -> pd.DataFrame
     return candles
 
 
+def build_ohlc_from_sheet(limit: int | None = 50000) -> dict[str, pd.DataFrame]:
+    """
+    Build OHLC candles from the already collected raw data (1-second rows) without any external API.
+
+    Returns:
+        {
+          "1m": df_1m,
+          "5m": df_5m,
+          "15m": df_15m,
+          "1h": df_1h
+        }
+    Raises:
+        DataError if data is missing or insufficient for any timeframe.
+    """
+    df = get_live_collected_data(limit=limit)
+    if df is None or df.empty:
+        raise DataError("No live data available to build OHLC.")
+
+    if not isinstance(df.index, pd.DatetimeIndex):
+        if "timestamp" in df.columns:
+            df = df.copy()
+            df["timestamp"] = pd.to_datetime(df["timestamp"])
+            df = df.set_index("timestamp")
+        else:
+            raise DataError("Data must have a DatetimeIndex or a 'timestamp' column.")
+
+    df = df.sort_index()
+    df = df[~df.index.duplicated(keep="last")]
+
+    def _resample(rule: str) -> pd.DataFrame:
+        candles = (
+            df.resample(rule)
+            .agg({"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"})
+            .dropna()
+        )
+        if candles.empty:
+            raise DataError(f"Not enough data to build {rule} candles.")
+        return candles
+
+    candles_1m = _resample("1T")
+    candles_5m = _resample("5T")
+    candles_15m = _resample("15T")
+    candles_1h = _resample("1H")
+
+    return {"1m": candles_1m, "5m": candles_5m, "15m": candles_15m, "1h": candles_1h}
+
+
 def get_collection_stats() -> dict:
     df = _cache["df"] if _cache["df"] is not None else _load_local_1m()
     return {

@@ -11,8 +11,12 @@ from fastapi.responses import JSONResponse
 
 from core.final_signal_engine import FinalSignalEngine
 from core.indicators import add_all_indicators
-from core.live_data_collector import append_live_price, build_timeframe_candles, get_live_collected_data
-from core.sheet_candles import build_ohlc_from_sheet
+from core.live_data_collector import (
+    append_live_price,
+    build_ohlc_from_sheet,
+    build_timeframe_candles,
+    get_live_collected_data,
+)
 from core.utils import DataError, isMarketOpen, nextMarketOpen, send_telegram, update_history
 
 app = FastAPI()
@@ -106,16 +110,16 @@ def run_signal():
             pass
 
         try:
-            # Prefer building candles from sheet-collected 1s data
+            # Prefer building candles from sheet-collected data (1s granularity)
             sheet_candles = build_ohlc_from_sheet()
-
-            def _resample(df, rule):
-                return df.resample(rule).agg({"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}).dropna()
-
             candles_5m = sheet_candles["5m"]
             candles_15m = sheet_candles["15m"]
             candles_1h = sheet_candles["1h"]
-            candles_4h = _resample(candles_1h, "240min")
+            candles_4h = candles_1h.resample("240min").agg(
+                {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}
+            ).dropna()
+            if candles_5m is None or candles_5m.empty:
+                raise DataError("5m candles unavailable from sheet data.")
         except Exception:
             try:
                 hist = get_live_collected_data(limit=50000)
