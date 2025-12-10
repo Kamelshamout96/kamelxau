@@ -1,5 +1,7 @@
 import json
 import os
+import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -10,6 +12,7 @@ from fastapi.responses import JSONResponse
 from core.final_signal_engine import FinalSignalEngine
 from core.indicators import add_all_indicators
 from core.live_data_collector import append_live_price, build_timeframe_candles, get_live_collected_data
+from core.sheet_candles import build_ohlc_from_sheet
 from core.utils import DataError, isMarketOpen, nextMarketOpen, send_telegram, update_history
 
 app = FastAPI()
@@ -20,6 +23,8 @@ DATA_DIR = Path("data")
 LAST_SIGNAL_FILE = DATA_DIR / "last_signal.json"
 DATA_DIR.mkdir(exist_ok=True)
 ENGINE = FinalSignalEngine()
+
+_live_thread_started = False
 
 
 def _load_last_signal() -> dict:
@@ -36,6 +41,25 @@ def _save_last_signal(signal: dict) -> None:
         LAST_SIGNAL_FILE.write_text(json.dumps(signal))
     except Exception:
         return
+
+
+def _ensure_live_price_thread():
+    """Start a background thread that calls append_live_price every 5 seconds."""
+    global _live_thread_started
+    if _live_thread_started:
+        return
+
+    def _runner():
+        while True:
+            try:
+                append_live_price()
+            except Exception:
+                pass
+            time.sleep(5)
+
+    t = threading.Thread(target=_runner, daemon=True)
+    t.start()
+    _live_thread_started = True
 
 
 def _fallback_history() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
@@ -75,19 +99,32 @@ def live_length():
 @app.get("/run-signal")
 def run_signal():
     try:
+        _ensure_live_price_thread()
         try:
             append_live_price()
         except Exception:
             pass
 
         try:
-            hist = get_live_collected_data(limit=50000)
-            candles_5m = build_timeframe_candles(hist, "5min")
-            candles_15m = build_timeframe_candles(hist, "15min")
-            candles_1h = build_timeframe_candles(hist, "60min")
-            candles_4h = build_timeframe_candles(hist, "240min")
-        except DataError:
-            candles_5m, candles_15m, candles_1h, candles_4h = _fallback_history()
+            # Prefer building candles from sheet-collected 1s data
+            sheet_candles = build_ohlc_from_sheet()
+
+            def _resample(df, rule):
+                return df.resample(rule).agg({"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}).dropna()
+
+            candles_5m = sheet_candles["5m"]
+            candles_15m = sheet_candles["15m"]
+            candles_1h = sheet_candles["1h"]
+            candles_4h = _resample(candles_1h, "240min")
+        except Exception:
+            try:
+                hist = get_live_collected_data(limit=50000)
+                candles_5m = build_timeframe_candles(hist, "5min")
+                candles_15m = build_timeframe_candles(hist, "15min")
+                candles_1h = build_timeframe_candles(hist, "60min")
+                candles_4h = build_timeframe_candles(hist, "240min")
+            except DataError:
+                candles_5m, candles_15m, candles_1h, candles_4h = _fallback_history()
 
         df_5m = add_all_indicators(candles_5m)
         df_15m = add_all_indicators(candles_15m)
