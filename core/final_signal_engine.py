@@ -6,6 +6,7 @@ plus duplicate prevention, and emits the final trading signal.
 from __future__ import annotations
 
 from typing import Any, Dict
+from datetime import timedelta
 
 from .bias_engine import BiasEngine
 from .duplicate_prevention_engine import DuplicatePreventionEngine
@@ -28,6 +29,8 @@ class FinalSignalEngine:
         self.analysis_engine = MarketAnalysisEngine(bias_engine, poi_detector, structure_engine, liquidity_engine)
         self.scalper_engine = ScalperExecutionEngine(structure_engine, liquidity_engine, reversal_engine)
         self.dup_engine = DuplicatePreventionEngine()
+        self.last_signal_time = None
+        self.fallback_timeout = timedelta(minutes=30)
 
     def run(self, df_5m, df_15m, df_1h, df_4h) -> Dict[str, Any]:
         analysis = self.analysis_engine.analyze(df_5m, df_15m, df_1h, df_4h)
@@ -61,6 +64,85 @@ class FinalSignalEngine:
             signal["action"] = "NO_TRADE"
             signal["reason"] = "bias_neutral"
 
+        # Fallback: only if Stage2 gave NO_TRADE, bias not neutral, and timeout elapsed
+        last_time = df_5m.index[-1] if len(df_5m) else None
+        if (
+            signal.get("action") == "NO_TRADE"
+            and bias != "NEUTRAL"
+            and last_time is not None
+            and (self.last_signal_time is None or (last_time - self.last_signal_time) >= self.fallback_timeout)
+        ):
+            price = float(df_5m.iloc[-1]["close"])
+            last_candle = df_5m.iloc[-1]
+            sweeps_ctx = ctx["sweeps"]
+            zones_ctx = ctx["zones"]
+            pools = ctx["pools"]
+            momentum_state = ctx.get("momentum", "unknown")
+            momentum_ok = momentum_state != "weak"
+
+            def _in_zone(zone):
+                return zone and zone.get("low") is not None and zone.get("high") is not None and zone["low"] <= price <= zone["high"]
+
+            demand_zone = zones_ctx.get("demand", {}).get("zone")
+            supply_zone = zones_ctx.get("supply", {}).get("zone")
+            bullish_candle = float(last_candle["close"]) > float(last_candle["open"])
+            bearish_candle = float(last_candle["close"]) < float(last_candle["open"])
+            bear_sweep = sweeps_ctx["5m"].get("type") == "above"
+            bull_sweep = sweeps_ctx["5m"].get("type") == "below"
+
+            action_fb = "NO_TRADE"
+            sl = tp1 = tp2 = tp3 = None
+
+            if bias == "BUY ONLY" and _in_zone(demand_zone) and bullish_candle and not bear_sweep and momentum_ok:
+                action_fb = "BUY"
+                lows = pools.get("lows", [])
+                highs = pools.get("highs", [])
+                sl = min(lows) if lows else price * 0.997
+                tp1 = min([h for h in highs if h > price], default=price * 1.001)
+                tp2 = min([h for h in highs if h > tp1], default=tp1 * 1.001)
+                tp3 = min([h for h in highs if h > tp2], default=tp2 * 1.001)
+            elif bias == "SELL ONLY" and _in_zone(supply_zone) and bearish_candle and not bull_sweep and momentum_ok:
+                action_fb = "SELL"
+                highs = pools.get("highs", [])
+                lows = pools.get("lows", [])
+                sl = max(highs) if highs else price * 1.003
+                tp1 = max([l for l in lows if l < price], default=price * 0.999)
+                tp2 = max([l for l in lows if l < tp1], default=tp1 * 0.999)
+                tp3 = max([l for l in lows if l < tp2], default=tp2 * 0.999)
+
+            if action_fb in ("BUY", "SELL"):
+                fb_signal = {
+                    "action": action_fb,
+                    "entry": round(price, 2),
+                    "sl": round(sl, 2) if sl else None,
+                    "tp": round(tp1, 2) if tp1 else None,
+                    "tp1": round(tp1, 2) if tp1 else None,
+                    "tp2": round(tp2, 2) if tp2 else None,
+                    "tp3": round(tp3, 2) if tp3 else None,
+                    "confidence": 45,
+                    "reason": "fallback_light_mode",
+                }
+                fb_context = {
+                    "time": last_time,
+                    "structure_tag": ctx["structure_shifts"]["5m"].get("direction"),
+                    "sweep_tag": sweeps_ctx["5m"].get("type"),
+                    "poi_tag": "bull" if action_fb == "BUY" else "bear",
+                    "momentum": momentum_state,
+                }
+                block_fb = self.dup_engine.should_block(fb_signal, fb_context)
+                if block_fb:
+                    return {"action": "NO_TRADE", "reason": "duplicate_block", "analysis": analysis.context}
+                signal = fb_signal
+                exec_ctx = {
+                    "structure": ctx["structure_shifts"],
+                    "sweeps": sweeps_ctx,
+                    "wick": {},
+                    "poi_touch": {},
+                    "structure_tag": fb_context["structure_tag"],
+                    "sweep_tag": fb_context["sweep_tag"],
+                    "poi_tag": fb_context["poi_tag"],
+                }
+
         signal["trend"] = {
             "4h": ctx["bias_context"]["htf_structure"]["4h"].get("bias", "neutral"),
             "1h": ctx["bias_context"]["htf_structure"]["1h"].get("bias", "neutral"),
@@ -90,5 +172,8 @@ class FinalSignalEngine:
             "channels": 10 if ctx["channel"].get("tap") else 0,
             "htf_context": 20 if bias != "NEUTRAL" else 0,
         }
+
+        if signal.get("action") in ("BUY", "SELL") and len(df_5m):
+            self.last_signal_time = df_5m.index[-1]
 
         return signal
