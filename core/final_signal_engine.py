@@ -30,8 +30,8 @@ class FinalSignalEngine:
         self.scalper_engine = ScalperExecutionEngine(structure_engine, liquidity_engine, reversal_engine)
         self.dup_engine = DuplicatePreventionEngine()
         self.last_signal_time = None
-        self.fallback_timeout = timedelta(minutes=30)
-        self.fallback_timeout_light = timedelta(minutes=4)
+        self.fallback_timeout = timedelta(minutes=15)
+        self.fallback_timeout_light = timedelta(minutes=2)
 
     def run(self, df_5m, df_15m, df_1h, df_4h) -> Dict[str, Any]:
         analysis = self.analysis_engine.analyze(df_5m, df_15m, df_1h, df_4h)
