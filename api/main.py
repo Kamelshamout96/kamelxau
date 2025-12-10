@@ -62,8 +62,15 @@ def forward_to_channel(update: Any) -> None:
         updates = []
         if isinstance(update, list):
             updates = update
-        elif isinstance(update, dict) and isinstance(update.get("result"), list):
-            updates = update.get("result", [])
+        elif isinstance(update, dict):
+            if isinstance(update.get("result"), list):
+                updates = update.get("result", [])
+            elif isinstance(update.get("updates"), list):  # alternate wrapper
+                updates = update.get("updates", [])
+            elif "update" in update and isinstance(update.get("update"), dict):
+                updates = [update.get("update")]
+            else:
+                updates = [update]
         else:
             updates = [update]
 
@@ -89,10 +96,11 @@ def forward_to_channel(update: Any) -> None:
             url = f"https://api.telegram.org/bot{TG_TOKEN}/forwardMessage"
             payload = {"chat_id": FORWARD_CHANNEL_ID, "from_chat_id": from_chat_id, "message_id": message_id}
             try:
-                resp = requests.post(url, json=payload, timeout=10)
+                # Use form payload for full Bot API compatibility
+                resp = requests.post(url, data=payload, timeout=10)
                 if resp.status_code >= 400:
                     try:
-                        print(f"Warning: forwardMessage failed ({resp.status_code}): {resp.text}")
+                        print(f"Warning: forwardMessage failed ({resp.status_code}) for msg {message_id}: {resp.text}")
                     except Exception:
                         pass
             except Exception:
