@@ -10,6 +10,7 @@ from fastapi.responses import JSONResponse
 from core.indicators import add_all_indicators
 from core.live_data_collector import append_live_price, build_timeframe_candles, get_live_collected_data
 from core.signal_engine import check_entry, check_ultra_entry, check_ultra_v3
+from core.scm_signal_engine import evaluate as evaluate_scm
 from core.utils import DataError, isMarketOpen, nextMarketOpen, send_telegram, update_history, validate_direction_consistency
 
 app = FastAPI()
@@ -152,6 +153,73 @@ def run_signal():
             send_telegram(TG_TOKEN, TG_CHAT, msg)
 
         return unified
+
+    except DataError as e:
+        return JSONResponse(status_code=200, content={"status": "waiting", "detail": str(e)})
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/run-scm")
+def run_scm():
+    """
+    Smart-money style endpoint (SCM_SIGNAL_ENGINE) that treats BUY/SELL independently
+    and returns the richer JSON structure specified in the instructions.
+    """
+    try:
+        try:
+            append_live_price()
+        except Exception:
+            pass
+
+        try:
+            hist = get_live_collected_data(limit=50000)
+            candles_5m = build_timeframe_candles(hist, "5min")
+            candles_15m = build_timeframe_candles(hist, "15min")
+            candles_1h = build_timeframe_candles(hist, "60min")
+            candles_4h = build_timeframe_candles(hist, "240min")
+        except DataError:
+            candles_5m, candles_15m, candles_1h, candles_4h = _fallback_history()
+
+        df_5m = add_all_indicators(candles_5m)
+        df_15m = add_all_indicators(candles_15m)
+        df_1h = add_all_indicators(candles_1h)
+        df_4h = add_all_indicators(candles_4h)
+
+        scm_sig = evaluate_scm(df_5m, df_15m, df_1h, df_4h)
+
+        _save_last_signal(scm_sig)
+
+        if scm_sig.get("action") in ("BUY", "SELL") and TG_TOKEN and TG_CHAT:
+            action_icon = "BUY" if scm_sig["action"] == "BUY" else "SELL"
+            confidence = scm_sig.get("confidence")
+            stars = ""
+            try:
+                if confidence is not None:
+                    c_val = float(confidence)
+                    stars_count = 3 if c_val >= 85 else 2 if c_val >= 70 else 1
+                    stars = " " + ("⭐" * stars_count)
+            except Exception:
+                stars = ""
+
+            tp_lines = []
+            for key in ("tp1", "tp2", "tp3"):
+                val = scm_sig.get(key)
+                if val is not None:
+                    tp_lines.append(f"{key.upper()}: {val}")
+            tp_text = "\n".join(tp_lines) if tp_lines else "TP: n/a"
+
+            side_icon = "🟢" if unified["action"] == "BUY" else "🔴"
+            msg = (
+                f"{side_icon} {action_icon} XAUUSD {stars} \n"
+                f"💰 Entry: {scm_sig.get('entry')} \n"
+                f"🛑 Stop Loss: {scm_sig.get('sl')} \n"
+                f"{tp_text} \n"
+            )
+
+            send_telegram(TG_TOKEN, TG_CHAT, msg)
+
+        return scm_sig
 
     except DataError as e:
         return JSONResponse(status_code=200, content={"status": "waiting", "detail": str(e)})
