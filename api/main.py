@@ -147,7 +147,7 @@ def run_signal():
                 f"💰 Entry: {unified.get('entry')} \n"
                 f"🛑 Stop Loss: {unified.get('sl')} \n"
                 f"{tp_text} \n"
-                "🕒 Timeframes: 5m > 15m > 1H > 4H"
+               
             )
 
             send_telegram(TG_TOKEN, TG_CHAT, msg)
@@ -209,7 +209,7 @@ def run_scm():
                     tp_lines.append(f"{key.upper()}: {val}")
             tp_text = "\n".join(tp_lines) if tp_lines else "TP: n/a"
 
-            side_icon = "🟢" if unified["action"] == "BUY" else "🔴"
+            side_icon = "🟢" if scm_sig["action"] == "BUY" else "🔴"
             msg = (
                 f"{side_icon} {action_icon} XAUUSD {stars} \n"
                 f"💰 Entry: {scm_sig.get('entry')} \n"
@@ -225,5 +225,3 @@ def run_scm():
         return JSONResponse(status_code=200, content={"status": "waiting", "detail": str(e)})
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
-
