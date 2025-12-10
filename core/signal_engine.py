@@ -305,6 +305,15 @@ def _detect_zones(df, touch_window: int = 40) -> Dict[str, Any]:
     }
 
 
+def _inside_zone(price: float, zone: Optional[Dict[str, float]]) -> bool:
+    if not zone:
+        return False
+    try:
+        return float(zone["low"]) <= price <= float(zone["high"])
+    except Exception:
+        return False
+
+
 def _channel_bounds(df, lookback=30):
     """Approximate channel bounds using recent extrema."""
     if len(df) == 0:
@@ -1377,6 +1386,8 @@ def micro_scalp_layer(df_5m, df_15m, df_1h, df_4h, human_layer: Dict[str, Any]) 
     )
 
     sweep = _liquidity_sweep(df_5m, lookback=12)
+    bos15 = human_layer.get("bos_choch", {}).get("15m", {})
+    zones = human_layer.get("zones", {})
     micro_swings = _local_swings(df_5m, lookback=10, window=1)
     swing_low = micro_swings.get("lows", [])[-1]["price"] if micro_swings.get("lows") else None
     swing_high = micro_swings.get("highs", [])[-1]["price"] if micro_swings.get("highs") else None
@@ -1422,6 +1433,28 @@ def micro_scalp_layer(df_5m, df_15m, df_1h, df_4h, human_layer: Dict[str, Any]) 
             "signal_type": "MICRO_SCALP",
             "trend": {"4h": trend_4h, "1h": trend_1h},
         }
+
+    # BOS / zone filters cannot be bypassed by relaxed momentum
+    if direction == "BUY" and bos15.get("direction") == "bearish":
+        score -= 25
+        if not (wick_bull or sweep.get("type") == "below"):
+            return {
+                "action": "NO_TRADE",
+                "reason": "15m bos bearish",
+                "signal_type": "MICRO_SCALP",
+                "trend": {"4h": trend_4h, "1h": trend_1h},
+            }
+    if direction == "BUY":
+        supply = zones.get("supply", {})
+        zone = supply.get("zone")
+        if supply.get("confidence", 0) >= 80 and _inside_zone(price, zone):
+            if not (micro_bias == "bullish" or (rsi_rising and hist_rising)):
+                return {
+                    "action": "NO_TRADE",
+                    "reason": "inside strong supply",
+                    "signal_type": "MICRO_SCALP",
+                    "trend": {"4h": trend_4h, "1h": trend_1h},
+                }
 
     score = 0
     score += 20  # HTF alignment baseline
@@ -1750,6 +1783,12 @@ def consolidate_signals(
         }
 
     candidates = []
+    bos15_dir = human_layer.get("bos_choch", {}).get("15m", {}).get("direction")
+    sweep15 = human_layer.get("liquidity_sweeps", {}).get("15m", {})
+    wicks15 = human_layer.get("wicks", {})
+    zones = human_layer.get("zones", {})
+    supply_zone = zones.get("supply", {})
+    demand_zone = zones.get("demand", {})
     for name, layer in (
         ("MICRO_SCALP", micro_layer),
         ("SCALP", scalp_layer),
@@ -1760,6 +1799,22 @@ def consolidate_signals(
         if action not in ("BUY", "SELL"):
             continue
         if master_direction != "NO_TRADE" and action != master_direction:
+            continue
+        entry_val = _safe_float(layer.get("entry"), None)
+        sl_val = _safe_float(layer.get("sl"), None)
+        tp_val = _safe_float(layer.get("tp1") or layer.get("tp"), None)
+        if action == "BUY" and bos15_dir == "bearish":
+            layer["score"] = max(0, layer.get("score", 0) - 25)
+            if not (wicks15.get("bullish") or sweep15.get("type") == "below"):
+                continue
+        if action == "BUY" and supply_zone.get("confidence", 0) >= 80 and entry_val is not None and _inside_zone(entry_val, supply_zone.get("zone")):
+            micro_ctx = layer.get("micro_context", {})
+            micro_bias = micro_ctx.get("micro_bias")
+            rsi_rising = micro_ctx.get("rsi_rising")
+            hist_rising = micro_ctx.get("hist_rising")
+            if not (micro_bias == "bullish" or (rsi_rising and hist_rising)):
+                continue
+        if action == "SELL" and demand_zone.get("confidence", 0) >= 80 and entry_val is not None and _inside_zone(entry_val, demand_zone.get("zone")):
             continue
         risk, rr = _risk_reward(layer.get("entry"), layer.get("sl"), layer.get("tp1") or layer.get("tp"), action)
         score = layer.get("score", 0)
@@ -1835,6 +1890,45 @@ def consolidate_signals(
     }
     final["debug_relaxed_rules"] = final.get("debug_relaxed_rules", False) or ict_layer.get("debug_relaxed_rules") or micro_layer.get("debug_relaxed_rules") or scalp_layer.get("debug_relaxed_rules") or ultra_layer.get("debug_relaxed_rules") or v3_layer.get("debug_relaxed_rules") or False
     if final["action"] in ("BUY", "SELL") and entry is not None:
+        bos15_dir = human_layer.get("bos_choch", {}).get("15m", {}).get("direction")
+        wicks15 = human_layer.get("wicks", {})
+        zones = human_layer.get("zones", {})
+        supply_zone = zones.get("supply", {})
+        demand_zone = zones.get("demand", {})
+        if final["action"] == "BUY":
+            if bos15_dir == "bearish" and not wicks15.get("bullish"):
+                return {
+                    "action": "NO_TRADE",
+                    "reason": "15m bos bearish",
+                    "signal_type": "UNIFIED",
+                    "htf_direction": master_direction,
+                    "layers": final["layers"],
+                }
+            if supply_zone.get("confidence", 0) >= 80 and _inside_zone(entry, supply_zone.get("zone")):
+                return {
+                    "action": "NO_TRADE",
+                    "reason": "inside strong supply",
+                    "signal_type": "UNIFIED",
+                    "htf_direction": master_direction,
+                    "layers": final["layers"],
+                }
+        if final["action"] == "SELL":
+            if bos15_dir == "bullish" and not wicks15.get("bearish"):
+                return {
+                    "action": "NO_TRADE",
+                    "reason": "15m bos bullish",
+                    "signal_type": "UNIFIED",
+                    "htf_direction": master_direction,
+                    "layers": final["layers"],
+                }
+            if demand_zone.get("confidence", 0) >= 80 and _inside_zone(entry, demand_zone.get("zone")):
+                return {
+                    "action": "NO_TRADE",
+                    "reason": "inside strong demand",
+                    "signal_type": "UNIFIED",
+                    "htf_direction": master_direction,
+                    "layers": final["layers"],
+                }
         validation_error = _validate_final_signal(final)
         if validation_error:
             tp1_new, tp2_new, tp3_new = _recalc_levels_from_risk(
