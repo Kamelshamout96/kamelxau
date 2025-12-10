@@ -533,6 +533,83 @@ def _order_tps(action: str, tps: List[float]) -> List[float]:
     return sorted(tps, reverse=True)
 
 
+def _micro_body_stats(candle: Dict[str, Any]) -> Tuple[float, float, float, float]:
+    """Return body, range, upper wick, lower wick for quick micro-candle checks."""
+    open_, high, low, close = map(float, (candle.get("open"), candle.get("high"), candle.get("low"), candle.get("close")))
+    body = abs(close - open_)
+    rng = max(high - low, 1e-8)
+    upper_wick = high - max(open_, close)
+    lower_wick = min(open_, close) - low
+    return body, rng, upper_wick, lower_wick
+
+
+def _micro_structural_targets(df_15m, df_1h, entry: float, direction: str) -> Optional[float]:
+    """Pick the nearest structural level (15m/1h swing) beyond entry for TP3."""
+    candidates: List[float] = []
+    for df in (df_15m, df_1h):
+        swings = _local_swings(df, lookback=80, window=2)
+        highs = [h["price"] for h in swings.get("highs", [])]
+        lows = [l["price"] for l in swings.get("lows", [])]
+        if direction == "BUY":
+            candidates.extend([h for h in highs if h > entry])
+        else:
+            candidates.extend([l for l in lows if l < entry])
+    if not candidates:
+        return None
+    if direction == "BUY":
+        return min(candidates)
+    return max(candidates)
+
+
+def _micro_sl_tp(entry: float, direction: str, swing_low: Optional[float], swing_high: Optional[float], structural_tp: Optional[float]) -> Tuple[float, float, float]:
+    """
+    Micro scalp-specific SL/TP logic with strict clamps:
+    - SL at last micro swing +/-3 USD
+    - SL distance clamped to [8, 15] USD
+    - TP1 forced to 3-7 USD away from entry
+    - TP2 = TP1 +/- 5
+    - TP3 = nearest structural level (fallback to TP2 +/- 5)
+    """
+    action = _sanitize_action(direction)
+    if action not in ("BUY", "SELL"):
+        raise ValueError("Micro SL/TP requires BUY or SELL direction")
+
+    if action == "BUY":
+        base_sl = (swing_low - 3) if swing_low is not None else entry - 10
+        dist = entry - base_sl
+        if dist < 8:
+            sl = entry - 8
+        elif dist > 15:
+            sl = entry - 15
+        else:
+            sl = base_sl
+
+        tp1 = entry + max(3.0, min(7.0, (entry - sl) * 0.65))
+        tp2 = tp1 + 5.0
+        if structural_tp and structural_tp > max(tp2, entry):
+            tp3 = structural_tp
+        else:
+            tp3 = tp2 + 5.0
+    else:
+        base_sl = (swing_high + 3) if swing_high is not None else entry + 10
+        dist = base_sl - entry
+        if dist < 8:
+            sl = entry + 8
+        elif dist > 15:
+            sl = entry + 15
+        else:
+            sl = base_sl
+
+        tp1 = entry - max(3.0, min(7.0, (sl - entry) * 0.65))
+        tp2 = tp1 - 5.0
+        if structural_tp and structural_tp < min(tp2, entry):
+            tp3 = structural_tp
+        else:
+            tp3 = tp2 - 5.0
+
+    return round(sl, 2), round(tp1, 2), round(tp2, 2), round(tp3, 2)
+
+
 def _should_block_duplicate(entry: float, action: str) -> bool:
     last_entry = _LAST_SIGNAL_STATE.get("entry")
     last_action = _LAST_SIGNAL_STATE.get("action")
@@ -833,6 +910,157 @@ def run_scalp_layer(df_5m, df_15m, df_1h, df_4h, human_layer: Dict[str, Any]) ->
     }
 
 
+def micro_scalp_layer(df_5m, df_15m, df_1h, df_4h, human_layer: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Micro scalp layer:
+    - Uses last 2-4 candles on 5m to detect momentum + wick rejection + micro-structure
+    - SL anchored to local swing with strict 8-15 USD clamp
+    - TP1 forced 3-7 USD away, TP2=TP1±5, TP3=next structural HTF level
+    """
+    if len(df_5m) < 4:
+        return {"action": "NO_TRADE", "reason": "insufficient data", "signal_type": "MICRO_SCALP"}
+
+    last5 = df_5m.iloc[-1]
+    tail4 = df_5m.tail(4)
+    recent5 = df_5m.tail(5)
+    price = float(last5["close"])
+
+    trend_4h = _trend(df_4h.iloc[-1])
+    trend_1h = _trend(df_1h.iloc[-1])
+    htf_direction = _final_direction(trend_4h, trend_1h)
+    if htf_direction == "NO_TRADE":
+        return {"action": "NO_TRADE", "reason": "HTF conflict", "signal_type": "MICRO_SCALP"}
+
+    atr5_val = _safe_float(last5.get("atr"), price * 0.0025) or price * 0.0025
+    atr15_val = _safe_float(df_15m.iloc[-1].get("atr"), atr5_val) or atr5_val
+
+    body, rng, upper_wick, lower_wick = _micro_body_stats(last5)
+    body_dominant = body > upper_wick and body > lower_wick and body >= 0.5 * rng
+    wick_bull, wick_bear = _wick_rejection(last5)
+    hist = tail4["macd"] - tail4["macd_signal"] if "macd" in tail4.columns and "macd_signal" in tail4.columns else None
+    rsi_rising = False
+    hist_rising = False
+    if "rsi" in tail4.columns and len(tail4["rsi"].dropna()) >= 2:
+        rsi_rising = tail4["rsi"].iloc[-1] > tail4["rsi"].iloc[-2]
+    if hist is not None and len(hist.dropna()) >= 2:
+        hist_rising = hist.iloc[-1] > hist.iloc[-2]
+
+    closes_up = tail4["close"].diff().dropna().gt(0)
+    closes_down = tail4["close"].diff().dropna().lt(0)
+    range_mean = (tail4["high"] - tail4["low"]).mean()
+    body_mean = (tail4["close"] - tail4["open"]).abs().mean()
+    bullish_push = (
+        last5["close"] > last5["open"]
+        and closes_up.tail(2).all()
+        and body >= max(range_mean * 0.6, body_mean)
+        and body_dominant
+    )
+    bearish_push = (
+        last5["close"] < last5["open"]
+        and closes_down.tail(2).all()
+        and body >= max(range_mean * 0.6, body_mean)
+        and body_dominant
+    )
+
+    sweep = _liquidity_sweep(df_5m, lookback=12)
+    micro_swings = _local_swings(df_5m, lookback=10, window=1)
+    swing_low = micro_swings.get("lows", [])[-1]["price"] if micro_swings.get("lows") else None
+    swing_high = micro_swings.get("highs", [])[-1]["price"] if micro_swings.get("highs") else None
+    micro_bias = _structure_bias(micro_swings)
+
+    minor_support = float(recent5["low"].min())
+    minor_resistance = float(recent5["high"].max())
+    bounce_support = last5["low"] <= minor_support * 1.002 and last5["close"] > last5["open"]
+    bounce_resistance = last5["high"] >= minor_resistance * 0.998 and last5["close"] < last5["open"]
+
+    structural_tp = _micro_structural_targets(df_15m, df_1h, price, htf_direction)
+
+    direction = htf_direction
+    if direction == "BUY":
+        sweep_ok = sweep.get("type") != "above"
+        rules_ok = all(
+            [
+                body_dominant and last5["close"] > last5["open"],
+                sweep_ok,
+                rsi_rising or hist_rising,
+                bounce_support,
+                bullish_push,
+                micro_bias in ("bullish", "neutral"),
+            ]
+        )
+        wick_ok = wick_bull or lower_wick > upper_wick
+    else:
+        sweep_ok = sweep.get("type") != "below"
+        rules_ok = all(
+            [
+                body_dominant and last5["close"] < last5["open"],
+                sweep_ok,
+                rsi_rising or hist_rising,
+                bounce_resistance,
+                bearish_push,
+                micro_bias in ("bearish", "neutral"),
+            ]
+        )
+        wick_ok = wick_bear or upper_wick > lower_wick
+
+    if not rules_ok:
+        return {
+            "action": "NO_TRADE",
+            "reason": "Micro rules not satisfied",
+            "signal_type": "MICRO_SCALP",
+            "trend": {"4h": trend_4h, "1h": trend_1h},
+        }
+
+    sl, tp1, tp2, tp3 = _micro_sl_tp(price, direction, swing_low, swing_high, structural_tp)
+
+    score = 0
+    score += 20  # HTF alignment baseline
+    score += 20 if bullish_push or bearish_push else 10
+    score += 15 if (rsi_rising or hist_rising) else 0
+    score += 15 if (bounce_support or bounce_resistance) else 0
+    score += 10 if wick_ok else 0
+    score += 10 if sweep_ok else 0
+    score += 10 if micro_bias == ("bullish" if direction == "BUY" else "bearish") else 5
+    confidence = float(min(100, max(60, score)))
+
+    return {
+        "action": direction,
+        "entry": round(price, 2),
+        "sl": sl,
+        "tp": tp1,
+        "tp1": tp1,
+        "tp2": tp2,
+        "tp3": tp3,
+        "signal_type": "MICRO_SCALP",
+        "confidence": confidence,
+        "score": score,
+        "score_breakdown": {
+            "htf_alignment": 20,
+            "momentum": 20 if bullish_push or bearish_push else 10,
+            "oscillator": 15 if (rsi_rising or hist_rising) else 0,
+            "bounce": 15 if (bounce_support or bounce_resistance) else 0,
+            "wick": 10 if wick_ok else 0,
+            "liquidity": 10 if sweep_ok else 0,
+            "structure": 10 if micro_bias == ("bullish" if direction == "BUY" else "bearish") else 5,
+        },
+        "trend": {"4h": trend_4h, "1h": trend_1h},
+        "atr5": atr5_val,
+        "atr15": atr15_val,
+        "htf_direction": htf_direction,
+        "reasoning": human_layer.get("explanation", []),
+        "micro_context": {
+            "body_dominant": body_dominant,
+            "wick_reject": {"bullish": wick_bull, "bearish": wick_bear},
+            "rsi_rising": rsi_rising,
+            "hist_rising": hist_rising,
+            "bounce_support": bounce_support,
+            "bounce_resistance": bounce_resistance,
+            "sweep": sweep,
+            "micro_bias": micro_bias,
+        },
+    }
+
+
 def run_ultra_layer(df_5m, df_15m, df_1h, df_4h, human_layer: Dict[str, Any]) -> Dict[str, Any]:
     """ULTRA layer wrapped to respect new stability + direction rules."""
     last5 = df_5m.iloc[-1]
@@ -995,6 +1223,7 @@ def run_ultra_v3_layer(df_5m, df_15m, df_1h, df_4h, human_layer: Dict[str, Any])
 
 def consolidate_signals(
     human_layer: Dict[str, Any],
+    micro_layer: Dict[str, Any],
     scalp_layer: Dict[str, Any],
     ultra_layer: Dict[str, Any],
     v3_layer: Dict[str, Any],
@@ -1002,7 +1231,12 @@ def consolidate_signals(
     """Merge layers and emit a single stable decision."""
     master_direction = human_layer.get("htf_direction", "NO_TRADE")
     candidates = []
-    for name, layer in (("SCALP", scalp_layer), ("ULTRA_V3", v3_layer), ("ULTRA", ultra_layer)):
+    for name, layer in (
+        ("MICRO_SCALP", micro_layer),
+        ("SCALP", scalp_layer),
+        ("ULTRA_V3", v3_layer),
+        ("ULTRA", ultra_layer),
+    ):
         action = _sanitize_action(layer.get("action"))
         if action not in ("BUY", "SELL"):
             continue
@@ -1010,8 +1244,9 @@ def consolidate_signals(
             continue
         score = layer.get("score", 0)
         confidence = _safe_float(layer.get("confidence"), 0) or 0
+        priority = 1 if (name == "MICRO_SCALP" and score >= 70) else 0
         candidates.append(
-            {"name": name, "score": score, "confidence": confidence, "payload": layer, "action": action}
+            {"name": name, "score": score, "confidence": confidence, "payload": layer, "action": action, "priority": priority}
         )
 
     if not candidates:
@@ -1020,10 +1255,16 @@ def consolidate_signals(
             "reason": "No aligned signals after consolidation",
             "signal_type": "UNIFIED",
             "htf_direction": master_direction,
-            "layers": {"human": human_layer, "scalp": scalp_layer, "ultra": ultra_layer, "ultra_v3": v3_layer},
+            "layers": {
+                "human": human_layer,
+                "micro_scalp": micro_layer,
+                "scalp": scalp_layer,
+                "ultra": ultra_layer,
+                "ultra_v3": v3_layer,
+            },
         }
 
-    best = sorted(candidates, key=lambda x: (x["score"], x["confidence"]), reverse=True)[0]
+    best = sorted(candidates, key=lambda x: (x["priority"], x["score"], x["confidence"]), reverse=True)[0]
     final = dict(best["payload"])
     final["action"] = best["action"]
     final["signal_type"] = "UNIFIED"
@@ -1033,7 +1274,13 @@ def consolidate_signals(
     final["human_summary"] = human_layer.get("explanation", [])
 
     entry = _safe_float(final.get("entry"), None)
-    final["layers"] = {"human": human_layer, "scalp": scalp_layer, "ultra": ultra_layer, "ultra_v3": v3_layer}
+    final["layers"] = {
+        "human": human_layer,
+        "micro_scalp": micro_layer,
+        "scalp": scalp_layer,
+        "ultra": ultra_layer,
+        "ultra_v3": v3_layer,
+    }
     if final["action"] in ("BUY", "SELL") and entry is not None:
         validation_error = _validate_final_signal(final)
         if validation_error:
@@ -1059,10 +1306,11 @@ def consolidate_signals(
 def check_entry(df_5m, df_15m, df_1h, df_4h):
     """Unified entry point combining human layer + scalp + ultra stacks."""
     human_layer = build_human_layer(df_5m, df_15m, df_1h, df_4h)
+    micro_layer = micro_scalp_layer(df_5m, df_15m, df_1h, df_4h, human_layer)
     scalp_layer = run_scalp_layer(df_5m, df_15m, df_1h, df_4h, human_layer)
     ultra_layer = run_ultra_layer(df_5m, df_15m, df_1h, df_4h, human_layer)
     v3_layer = run_ultra_v3_layer(df_5m, df_15m, df_1h, df_4h, human_layer)
-    return consolidate_signals(human_layer, scalp_layer, ultra_layer, v3_layer)
+    return consolidate_signals(human_layer, micro_layer, scalp_layer, ultra_layer, v3_layer)
 
 
 def check_ultra_entry(df_5m, df_15m, df_1h, df_4h):
