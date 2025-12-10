@@ -256,3 +256,30 @@ async def telegram_update(update: Any):
         pass
     forward_to_channel(update)
     return {"ok": True}
+
+
+@app.post("/telegram/incoming")
+async def telegram_incoming(update: dict):
+    if not TG_TOKEN:
+        return {"status": "ignored"}
+
+    message = update.get("message")
+    if not message:
+        return {"status": "ignored"}
+
+    from_chat_id = message.get("chat", {}).get("id")
+    message_id = message.get("message_id")
+
+    if from_chat_id is None or message_id is None:
+        return {"status": "ignored"}
+
+    try:
+        url = f"https://api.telegram.org/bot{TG_TOKEN}/forwardMessage"
+        params = {"chat_id": FORWARD_CHANNEL_ID, "from_chat_id": from_chat_id, "message_id": message_id}
+        resp = requests.get(url, params=params, timeout=10)
+        if resp.status_code == 200:
+            return {"status": "forwarded"}
+    except Exception:
+        pass
+
+    return {"status": "error"}
