@@ -95,23 +95,48 @@ class FinalSignalEngine:
 
             action_fb = "NO_TRADE"
             sl = tp1 = tp2 = tp3 = None
+            try:
+                atr = float(df_5m["ATR"].iloc[-1])
+            except:
+                # fallback fast ATR
+                import numpy as np
+
+                def fast_atr(df, period=14):
+                    tr = np.maximum.reduce(
+                        [
+                            df["high"] - df["low"],
+                            abs(df["high"] - df["close"].shift(1)),
+                            abs(df["low"] - df["close"].shift(1)),
+                        ]
+                    )
+                    return tr.rolling(period).mean().iloc[-1]
+
+                atr = float(fast_atr(df_5m))
+
+            body = abs(last_candle["close"] - last_candle["open"])
+            wick = (last_candle["high"] - last_candle["low"]) - body
+            volatility_ratio = (wick / body) if body > 0 else 2.0
+
+            sweep_factor = 1.5 if sweeps_ctx["5m"].get("type") else 1.0
+
+            momentum_factor = 1.3 if momentum_state == "strong" else 1.0
 
             if _in_zone(demand_zone) and bullish_candle and not bear_sweep and momentum_ok and bias in ("BUY ONLY", "NEUTRAL"):
                 action_fb = "BUY"
-                lows = pools.get("lows", [])
-                highs = pools.get("highs", [])
-                sl = min(lows) if lows else price * 0.997
-                tp1 = min([h for h in highs if h > price], default=price * 1.001)
-                tp2 = min([h for h in highs if h > tp1], default=tp1 * 1.001)
-                tp3 = min([h for h in highs if h > tp2], default=tp2 * 1.001)
+                base_sl = atr * 1.8
+                sl = price - (base_sl * sweep_factor * volatility_ratio / 1.2)
+
+                tp1 = price + atr * (1.0 * momentum_factor)
+                tp2 = price + atr * (1.6 * momentum_factor)
+                tp3 = price + atr * (2.2 * momentum_factor)
             elif _in_zone(supply_zone) and bearish_candle and not bull_sweep and momentum_ok and bias in ("SELL ONLY", "NEUTRAL"):
                 action_fb = "SELL"
-                highs = pools.get("highs", [])
-                lows = pools.get("lows", [])
-                sl = max(highs) if highs else price * 1.003
-                tp1 = max([l for l in lows if l < price], default=price * 0.999)
-                tp2 = max([l for l in lows if l < tp1], default=tp1 * 0.999)
-                tp3 = max([l for l in lows if l < tp2], default=tp2 * 0.999)
+                base_sl = atr * 1.8
+                sl = price + (base_sl * sweep_factor * volatility_ratio / 1.2)
+
+                tp1 = price - atr * (1.0 * momentum_factor)
+                tp2 = price - atr * (1.6 * momentum_factor)
+                tp3 = price - atr * (2.2 * momentum_factor)
 
             if action_fb in ("BUY", "SELL"):
                 fb_signal = {
