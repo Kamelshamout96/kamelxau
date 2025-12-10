@@ -95,50 +95,51 @@ class FinalSignalEngine:
 
             action_fb = "NO_TRADE"
             sl = tp1 = tp2 = tp3 = None
-            try:
-                atr = float(df_5m["ATR"].iloc[-1])
-            except:
-                # fallback fast ATR
+            atr = ctx.get("indicators", {}).get("atr_5m")
+            if not atr:
+                for col in ("atr", "atr_14", "ATR", "ATR_14"):
+                    if col in df_5m.columns:
+                        try:
+                            atr = float(df_5m[col].iloc[-1])
+                            break
+                        except Exception:
+                            atr = None
+            if atr is None:
                 import numpy as np
                 import pandas as pd
 
-                def fast_atr(df, period=14):
+                def _atr14(df):
                     tr = np.maximum.reduce(
                         [
                             df["high"] - df["low"],
-                            abs(df["high"] - df["close"].shift(1)),
-                            abs(df["low"] - df["close"].shift(1)),
+                            (df["high"] - df["close"].shift(1)).abs(),
+                            (df["low"] - df["close"].shift(1)).abs(),
                         ]
                     )
-                    tr_series = pd.Series(tr, index=df.index)
-                    return tr_series.rolling(period).mean().iloc[-1]
+                    return pd.Series(tr, index=df.index).rolling(14).mean().iloc[-1]
 
-                atr = float(fast_atr(df_5m))
+                atr = float(_atr14(df_5m))
 
-            body = abs(last_candle["close"] - last_candle["open"])
-            wick = (last_candle["high"] - last_candle["low"]) - body
-            volatility_ratio = (wick / body) if body > 0 else 2.0
-
-            sweep_factor = 1.5 if sweeps_ctx["5m"].get("type") else 1.0
-
-            momentum_factor = 1.3 if momentum_state == "strong" else 1.0
+            atr = float(atr)
 
             if _in_zone(demand_zone) and bullish_candle and not bear_sweep and momentum_ok and bias in ("BUY ONLY", "NEUTRAL"):
                 action_fb = "BUY"
-                base_sl = atr * 1.8
-                sl = price - (base_sl * sweep_factor * volatility_ratio / 1.2)
+                sl_raw = price - (atr * 2.5)
+                sl_hard = price - 10
+                sl = min(sl_raw, sl_hard)
 
-                tp1 = price + atr * (1.0 * momentum_factor)
-                tp2 = price + atr * (1.6 * momentum_factor)
-                tp3 = price + atr * (2.2 * momentum_factor)
+                tp1 = price + (atr * 1.0)
+                tp2 = price + (atr * 1.6)
+                tp3 = price + (atr * 2.2)
             elif _in_zone(supply_zone) and bearish_candle and not bull_sweep and momentum_ok and bias in ("SELL ONLY", "NEUTRAL"):
                 action_fb = "SELL"
-                base_sl = atr * 1.8
-                sl = price + (base_sl * sweep_factor * volatility_ratio / 1.2)
+                sl_raw = price + (atr * 2.5)
+                sl_hard = price + 10
+                sl = max(sl_raw, sl_hard)
 
-                tp1 = price - atr * (1.0 * momentum_factor)
-                tp2 = price - atr * (1.6 * momentum_factor)
-                tp3 = price - atr * (2.2 * momentum_factor)
+                tp1 = price - (atr * 1.0)
+                tp2 = price - (atr * 1.6)
+                tp3 = price - (atr * 2.2)
 
             if action_fb in ("BUY", "SELL"):
                 fb_signal = {

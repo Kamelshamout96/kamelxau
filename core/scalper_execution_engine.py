@@ -77,49 +77,48 @@ class ScalperExecutionEngine:
         entry = float(df_5m["close"].iloc[-1])
 
         if action in ("BUY", "SELL"):
-            try:
-                atr = float(df_5m["ATR"].iloc[-1])
-            except:
-                # fast ATR fallback
+            atr = None
+            for col in ("atr", "atr_14", "ATR", "ATR_14"):
+                if col in df_5m.columns:
+                    try:
+                        atr = float(df_5m[col].iloc[-1])
+                        break
+                    except Exception:
+                        atr = None
+            if atr is None:
                 import numpy as np
                 import pandas as pd
 
-                def fast_atr(df, period=14):
+                def _atr14(df):
                     tr = np.maximum.reduce(
                         [
                             df["high"] - df["low"],
-                            abs(df["high"] - df["close"].shift(1)),
-                            abs(df["low"] - df["close"].shift(1)),
+                            (df["high"] - df["close"].shift(1)).abs(),
+                            (df["low"] - df["close"].shift(1)).abs(),
                         ]
                     )
-                    tr_series = pd.Series(tr, index=df.index)
-                    return tr_series.rolling(period).mean().iloc[-1]
+                    return pd.Series(tr, index=df.index).rolling(14).mean().iloc[-1]
 
-                atr = float(fast_atr(df_5m))
+                atr = float(_atr14(df_5m))
 
-            last_c = df_5m.iloc[-1]
-            body = abs(last_c["close"] - last_c["open"])
-            wick_component = (last_c["high"] - last_c["low"]) - body
-            volatility_ratio = (wick_component / body) if body > 0 else 2.0
-
-            sweep_5m = sweeps["5m"].get("type")
-            sweep_factor = 1.5 if sweep_5m else 1.0
-
-            momentum_state = channel_ctx.get("momentum", "unknown")
-            momentum_factor = 1.3 if momentum_state == "strong" else 1.0
+            atr = float(atr)
 
             if action == "BUY":
-                sl = entry - (atr * 1.8 * sweep_factor * volatility_ratio / 1.2)
-                tp1 = entry + atr * (1.0 * momentum_factor)
-                tp2 = entry + atr * (1.6 * momentum_factor)
-                tp3 = entry + atr * (2.2 * momentum_factor)
+                sl_raw = entry - (atr * 2.5)
+                sl_hard = entry - 10
+                sl = min(sl_raw, sl_hard)
+                tp1 = entry + (atr * 1.0)
+                tp2 = entry + (atr * 1.6)
+                tp3 = entry + (atr * 2.2)
                 tp = tp1
 
             elif action == "SELL":
-                sl = entry + (atr * 1.8 * sweep_factor * volatility_ratio / 1.2)
-                tp1 = entry - atr * (1.0 * momentum_factor)
-                tp2 = entry - atr * (1.6 * momentum_factor)
-                tp3 = entry - atr * (2.2 * momentum_factor)
+                sl_raw = entry + (atr * 2.5)
+                sl_hard = entry + 10
+                sl = max(sl_raw, sl_hard)
+                tp1 = entry - (atr * 1.0)
+                tp2 = entry - (atr * 1.6)
+                tp3 = entry - (atr * 2.2)
                 tp = tp1
 
         confidence = self.cfg.min_confidence if action in ("BUY", "SELL") else 0.0
