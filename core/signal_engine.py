@@ -372,11 +372,11 @@ def _build_human_explanation(
         notes.append(f"15m liquidity sweep {sweeps['15m']['type']}")
     if sweeps.get("5m", {}).get("type"):
         notes.append(f"5m liquidity sweep {sweeps['5m']['type']}")
-    if zones.get("demand", {}).get("zone") and master_direction == "BUY":
+    if zones.get("demand", {}).get("zone"):
         notes.append(
             f"Demand zone touched {zones['demand']['touches']} times (conf {zones['demand']['confidence']:.0f}%)"
         )
-    if zones.get("supply", {}).get("zone") and master_direction == "SELL":
+    if zones.get("supply", {}).get("zone"):
         notes.append(
             f"Supply zone touched {zones['supply']['touches']} times (conf {zones['supply']['confidence']:.0f}%)"
         )
@@ -488,7 +488,8 @@ def _record_signal(entry: float, action: str) -> None:
 def _score_trade(context: Dict[str, Any]) -> Tuple[int, Dict[str, int]]:
     """Apply the fixed human-like scoring matrix."""
     breakdown = {
-        "htf_alignment": 40 if context.get("htf_alignment") else 0,
+        # HTF alignment should inform but not dominate intra-day direction choice.
+        "htf_alignment": 20 if context.get("htf_alignment") else 0,
         "zones": 25 if context.get("zones") else 0,
         "liquidity": 20 if context.get("liquidity") else 0,
         "channels": 15 if context.get("channels") else 0,
@@ -624,7 +625,7 @@ def run_scalp_layer(df_5m, df_15m, df_1h, df_4h, human_layer: Dict[str, Any]) ->
     trend_4h = _trend(last4h)
     trend_1h = _trend(last1h)
     trend_15 = _trend(last15)
-    direction = _final_direction(trend_4h, trend_1h)
+    master_direction = _final_direction(trend_4h, trend_1h)
 
     adx_conf, tier5, tier15, tier1h, tier4h = _compute_adx_conf(
         _safe_float(last5.get("adx"), 0),
@@ -632,24 +633,6 @@ def run_scalp_layer(df_5m, df_15m, df_1h, df_4h, human_layer: Dict[str, Any]) ->
         _safe_float(last1h.get("adx"), 0),
         _safe_float(last4h.get("adx"), 0),
     )
-
-    if direction == "NO_TRADE":
-        return {
-            "action": "NO_TRADE",
-            "reason": "HTF alignment missing",
-            "signal_type": "SCALP",
-            "trend": {"4h": trend_4h, "1h": trend_1h, "15m": trend_15},
-        }
-
-    if trend_15 in ("bullish", "bearish") and (
-        (trend_15 == "bullish" and direction == "SELL") or (trend_15 == "bearish" and direction == "BUY")
-    ):
-        return {
-            "action": "NO_TRADE",
-            "reason": "15m cannot contradict HTF",
-            "signal_type": "SCALP",
-            "trend": {"4h": trend_4h, "1h": trend_1h, "15m": trend_15},
-        }
 
     sweep5 = _liquidity_sweep(df_5m, lookback=20)
     bos5 = human_layer.get("bos_choch", {}).get("5m", {})
@@ -659,9 +642,33 @@ def run_scalp_layer(df_5m, df_15m, df_1h, df_4h, human_layer: Dict[str, Any]) ->
     atr5 = _safe_float(last5.get("atr"), price * 0.003) or price * 0.003
     atr1h = _safe_float(last1h.get("atr"), atr5) or atr5
 
+    # Evaluate LTF bearish/bullish cues and allow them to override HTF bias.
+    wick_bull, wick_bear = _wick_rejection(last5)
+    bearish_triggers = [
+        bos5.get("direction") == "bearish" or bos15.get("direction") == "bearish",
+        sweep5.get("type") == "above",
+        channel_ctx.get("tap") == "resistance",
+        zones.get("supply", {}).get("confidence", 0) >= 50,
+        trend_15 == "bearish",
+    ]
+    bullish_triggers = [
+        bos5.get("direction") == "bullish" or bos15.get("direction") == "bullish",
+        sweep5.get("type") == "below",
+        channel_ctx.get("tap") == "support",
+        zones.get("demand", {}).get("confidence", 0) >= 50,
+        trend_15 == "bullish",
+    ]
+
+    direction = master_direction
+    if any(bearish_triggers) and not any(bullish_triggers):
+        direction = "SELL"
+    elif any(bullish_triggers) and not any(bearish_triggers):
+        direction = "BUY"
+    elif direction == "NO_TRADE":
+        direction = "SELL" if len([t for t in bearish_triggers if t]) > len([t for t in bullish_triggers if t]) else "BUY"
+
     sl, tp1, tp2, tp3 = _build_levels(direction, price, df_5m, df_15m, df_1h, zones, channel_ctx, atr5, atr1h)
 
-    wick_bull, wick_bear = _wick_rejection(last5)
     wick_ok = (wick_bull and direction == "BUY") or (wick_bear and direction == "SELL")
     sweep_ok = (sweep5.get("type") == "below" and direction == "BUY") or (sweep5.get("type") == "above" and direction == "SELL")
     bos_ok = (bos5.get("direction") == ("bullish" if direction == "BUY" else "bearish")) or (
@@ -673,7 +680,7 @@ def run_scalp_layer(df_5m, df_15m, df_1h, df_4h, human_layer: Dict[str, Any]) ->
     zone_conf = zones.get("demand", {}).get("confidence", 0) if direction == "BUY" else zones.get("supply", {}).get("confidence", 0)
 
     score_ctx = {
-        "htf_alignment": True,
+        "htf_alignment": direction == master_direction and master_direction != "NO_TRADE",
         "zones": zone_conf >= 50,
         "liquidity": sweep_ok,
         "channels": channel_ok,
@@ -714,17 +721,35 @@ def run_ultra_layer(df_5m, df_15m, df_1h, df_4h, human_layer: Dict[str, Any]) ->
 
     trend_4h = _trend(last4h)
     trend_1h = _trend(last1h)
-    direction = _final_direction(trend_4h, trend_1h)
-    if direction == "NO_TRADE":
-        return {"action": "NO_TRADE", "reason": "HTF not aligned", "signal_type": "ULTRA"}
+    master_direction = _final_direction(trend_4h, trend_1h)
 
     sweep = _liquidity_sweep(df_5m, lookback=20)
     bos = _detect_bos_choch(df_5m, "5m")
     wick_bull, wick_bear = _wick_rejection(last5)
-    wick_ok = (wick_bull and direction == "BUY") or (wick_bear and direction == "SELL")
-
     zones = human_layer.get("zones", _detect_zones(df_1h))
     channel_ctx = _detect_channel_context(df_5m, price)
+
+    bearish_triggers = [
+        bos.get("direction") == "bearish",
+        sweep.get("type") == "above",
+        channel_ctx.get("tap") == "resistance",
+        zones.get("supply", {}).get("confidence", 0) >= 50,
+    ]
+    bullish_triggers = [
+        bos.get("direction") == "bullish",
+        sweep.get("type") == "below",
+        channel_ctx.get("tap") == "support",
+        zones.get("demand", {}).get("confidence", 0) >= 50,
+    ]
+    direction = master_direction
+    if any(bearish_triggers) and not any(bullish_triggers):
+        direction = "SELL"
+    elif any(bullish_triggers) and not any(bearish_triggers):
+        direction = "BUY"
+    elif direction == "NO_TRADE":
+        direction = "SELL" if len([t for t in bearish_triggers if t]) > len([t for t in bullish_triggers if t]) else "BUY"
+
+    wick_ok = (wick_bull and direction == "BUY") or (wick_bear and direction == "SELL")
     atr5 = _safe_float(last5.get("atr"), price * 0.003) or price * 0.003
     atr1h = _safe_float(last1h.get("atr"), atr5) or atr5
     sl, tp1, tp2, tp3 = _build_levels(direction, price, df_5m, df_15m, df_1h, zones, channel_ctx, atr5, atr1h)
@@ -735,7 +760,7 @@ def run_ultra_layer(df_5m, df_15m, df_1h, df_4h, human_layer: Dict[str, Any]) ->
     zone_conf = zones.get("demand", {}).get("confidence", 0) if direction == "BUY" else zones.get("supply", {}).get("confidence", 0)
 
     score_ctx = {
-        "htf_alignment": True,
+        "htf_alignment": direction == master_direction and master_direction != "NO_TRADE",
         "zones": zone_conf >= 50,
         "liquidity": sweep_ok,
         "channels": channel_ok,
@@ -775,22 +800,38 @@ def run_ultra_v3_layer(df_5m, df_15m, df_1h, df_4h, human_layer: Dict[str, Any])
     trend_4h = _trend(last4h)
     trend_1h = _trend(last1h)
     trend_15 = _trend(last15)
-    direction = _final_direction(trend_4h, trend_1h)
-    if direction == "NO_TRADE":
-        return {"action": "NO_TRADE", "reason": "HTF not aligned", "signal_type": "ULTRA_V3"}
-    if trend_15 in ("bullish", "bearish") and (
-        (trend_15 == "bullish" and direction == "SELL") or (trend_15 == "bearish" and direction == "BUY")
-    ):
-        return {"action": "NO_TRADE", "reason": "15m confirm failed", "signal_type": "ULTRA_V3"}
+    master_direction = _final_direction(trend_4h, trend_1h)
 
     sweep = _liquidity_sweep(df_5m, lookback=18)
     bos = _detect_bos_choch(df_5m, "5m")
     bos15 = _detect_bos_choch(df_15m, "15m")
     wick_bull, wick_bear = _wick_rejection(last5)
-    wick_ok = (wick_bull and direction == "BUY") or (wick_bear and direction == "SELL")
-
     zones = human_layer.get("zones", _detect_zones(df_1h))
     channel_ctx = _detect_channel_context(df_5m, price)
+
+    bearish_triggers = [
+        bos.get("direction") == "bearish" or bos15.get("direction") == "bearish",
+        sweep.get("type") == "above",
+        channel_ctx.get("tap") == "resistance",
+        zones.get("supply", {}).get("confidence", 0) >= 50,
+        trend_15 == "bearish",
+    ]
+    bullish_triggers = [
+        bos.get("direction") == "bullish" or bos15.get("direction") == "bullish",
+        sweep.get("type") == "below",
+        channel_ctx.get("tap") == "support",
+        zones.get("demand", {}).get("confidence", 0) >= 50,
+        trend_15 == "bullish",
+    ]
+    direction = master_direction
+    if any(bearish_triggers) and not any(bullish_triggers):
+        direction = "SELL"
+    elif any(bullish_triggers) and not any(bearish_triggers):
+        direction = "BUY"
+    elif direction == "NO_TRADE":
+        direction = "SELL" if len([t for t in bearish_triggers if t]) > len([t for t in bullish_triggers if t]) else "BUY"
+
+    wick_ok = (wick_bull and direction == "BUY") or (wick_bear and direction == "SELL")
     atr5 = _safe_float(last5.get("atr"), price * 0.003) or price * 0.003
     atr1h = _safe_float(last1h.get("atr"), atr5) or atr5
     sl, tp1, tp2, tp3 = _build_levels(direction, price, df_5m, df_15m, df_1h, zones, channel_ctx, atr5, atr1h)
@@ -803,7 +844,7 @@ def run_ultra_v3_layer(df_5m, df_15m, df_1h, df_4h, human_layer: Dict[str, Any])
     zone_conf = zones.get("demand", {}).get("confidence", 0) if direction == "BUY" else zones.get("supply", {}).get("confidence", 0)
 
     score_ctx = {
-        "htf_alignment": True,
+        "htf_alignment": direction == master_direction and master_direction != "NO_TRADE",
         "zones": zone_conf >= 50,
         "liquidity": sweep_ok,
         "channels": channel_ok,
