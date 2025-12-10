@@ -1043,8 +1043,20 @@ def run_ict_layer(df_5m, df_15m, df_1h, df_4h) -> Dict[str, Any]:
     struct_5m = _detect_structure(df_5m, lookback=80, window=2)
 
     direction = _ict_direction(struct_4h, struct_1h)
+    relaxed = False
     if direction == "NO_TRADE":
-        return {"action": "NO_TRADE", "reason": "htf not aligned", "signal_type": "ICT"}
+        htf_bearish = struct_4h.get("bias") == "bearish" or struct_1h.get("bias") == "bearish"
+        zones_1h = _detect_zones(df_1h)
+        demand_conf = zones_1h.get("demand", {}).get("confidence", 0)
+        choch_bull = _detect_bos_choch(df_15m, "15m").get("direction") == "bullish"
+        swing_hl = struct_15m.get("label") == "HH-HL" or struct_15m.get("bias") == "bullish"
+        if (not htf_bearish) and choch_bull and demand_conf >= 40 and swing_hl:
+            direction = "BUY"
+            relaxed = True
+        else:
+            return {"action": "NO_TRADE", "reason": "htf not aligned", "signal_type": "ICT"}
+    if direction == "BUY" and (struct_4h.get("bias") == "bearish" and struct_1h.get("bias") == "bearish"):
+        return {"action": "NO_TRADE", "reason": "htf contradicts", "signal_type": "ICT"}
 
     sweep15 = _liquidity_sweep(df_15m, lookback=30)
     bos15 = _detect_bos_choch(df_15m, "15m")
@@ -1125,6 +1137,7 @@ def run_ict_layer(df_5m, df_15m, df_1h, df_4h) -> Dict[str, Any]:
         "reasoning": reasoning,
         "signal_type": "ICT",
         "structure": {"4h": struct_4h, "1h": struct_1h, "15m": struct_15m, "5m": struct_5m},
+        "debug_relaxed_rules": relaxed,
     }
 
 
@@ -1149,16 +1162,8 @@ def run_scalp_layer(df_5m, df_15m, df_1h, df_4h, human_layer: Dict[str, Any]) ->
         _safe_float(last1h.get("adx"), 0),
         _safe_float(last4h.get("adx"), 0),
     )
-
-    adx5_val = _safe_float(last5.get("adx"), 0)
-    adx15_val = _safe_float(last15.get("adx"), 0)
-    if adx5_val is not None and adx15_val is not None and (adx5_val < 20 or adx15_val < 20):
-        return {
-            "action": "NO_TRADE",
-            "reason": "weak momentum",
-            "signal_type": "SCALP",
-            "trend": {"4h": trend_4h, "1h": trend_1h, "15m": trend_15},
-        }
+    weak_momentum = (_safe_float(last5.get("adx"), 0) or 0) < 20 or (_safe_float(last15.get("adx"), 0) or 0) < 20
+    relaxed = weak_momentum
 
     if direction == "NO_TRADE":
         return {
@@ -1246,7 +1251,7 @@ def run_scalp_layer(df_5m, df_15m, df_1h, df_4h, human_layer: Dict[str, Any]) ->
         "channels": channel_ok,
         "bos": bos_ok,
         "wick": wick_ok,
-        "momentum": adx_conf != "blocked",
+        "momentum": not weak_momentum,
     }
     score, breakdown = _score_trade(score_ctx)
 
@@ -1272,8 +1277,9 @@ def run_scalp_layer(df_5m, df_15m, df_1h, df_4h, human_layer: Dict[str, Any]) ->
             "trend": {"4h": trend_4h, "1h": trend_1h, "15m": trend_15},
         }
 
-    action = direction if score >= 60 else "NO_TRADE"
-    confidence = float(min(100, max(60, score))) if action != "NO_TRADE" else float(min(score, 60))
+    action = direction if score >= 50 or relaxed else direction if score >= 60 else "NO_TRADE"
+    confidence_base = float(min(100, max(55 if relaxed else 60, score)))
+    confidence = confidence_base - 10 if weak_momentum else confidence_base
 
     return {
         "action": action,
@@ -1292,6 +1298,7 @@ def run_scalp_layer(df_5m, df_15m, df_1h, df_4h, human_layer: Dict[str, Any]) ->
         "atr15": atr15_val,
         "reasoning": human_layer.get("explanation", []),
         "adx_conf": adx_conf,
+        "debug_relaxed_rules": relaxed,
     }
 
 
@@ -1318,10 +1325,7 @@ def micro_scalp_layer(df_5m, df_15m, df_1h, df_4h, human_layer: Dict[str, Any]) 
 
     atr5_val = _safe_float(last5.get("atr"), price * 0.0025) or price * 0.0025
     atr15_val = _safe_float(df_15m.iloc[-1].get("atr"), atr5_val) or atr5_val
-    adx5_val = _safe_float(last5.get("adx"), 0)
-    adx15_val = _safe_float(df_15m.iloc[-1].get("adx"), 0)
-    if adx5_val is not None and adx15_val is not None and (adx5_val < 20 or adx15_val < 20):
-        return {"action": "NO_TRADE", "reason": "weak momentum", "signal_type": "MICRO_SCALP"}
+    weak_momentum = ((_safe_float(last5.get("adx"), 0) or 0) < 20) or ((_safe_float(df_15m.iloc[-1].get("adx"), 0) or 0) < 20)
 
     body, rng, upper_wick, lower_wick = _micro_body_stats(last5)
     body_dominant = body > upper_wick and body > lower_wick and body >= 0.5 * rng
@@ -1371,9 +1375,7 @@ def micro_scalp_layer(df_5m, df_15m, df_1h, df_4h, human_layer: Dict[str, Any]) 
             [
                 body_dominant and last5["close"] > last5["open"],
                 sweep_ok,
-                rsi_rising or hist_rising,
                 bounce_support,
-                bullish_push,
                 micro_bias in ("bullish", "neutral"),
             ]
         )
@@ -1384,23 +1386,21 @@ def micro_scalp_layer(df_5m, df_15m, df_1h, df_4h, human_layer: Dict[str, Any]) 
             [
                 body_dominant and last5["close"] < last5["open"],
                 sweep_ok,
-                rsi_rising or hist_rising,
                 bounce_resistance,
-                bearish_push,
                 micro_bias in ("bearish", "neutral"),
             ]
         )
         wick_ok = wick_bear or upper_wick > lower_wick
 
-    if not rules_ok:
+    sl, tp1, tp2, tp3 = _micro_sl_tp(price, direction, swing_low, swing_high, structural_tp)
+    risk, rr = _risk_reward(price, sl, tp1, direction)
+    if not rules_ok and (rr is None or rr < 1.0):
         return {
             "action": "NO_TRADE",
             "reason": "Micro rules not satisfied",
             "signal_type": "MICRO_SCALP",
             "trend": {"4h": trend_4h, "1h": trend_1h},
         }
-
-    sl, tp1, tp2, tp3 = _micro_sl_tp(price, direction, swing_low, swing_high, structural_tp)
 
     score = 0
     score += 20  # HTF alignment baseline
@@ -1410,7 +1410,9 @@ def micro_scalp_layer(df_5m, df_15m, df_1h, df_4h, human_layer: Dict[str, Any]) 
     score += 10 if wick_ok else 0
     score += 10 if sweep_ok else 0
     score += 10 if micro_bias == ("bullish" if direction == "BUY" else "bearish") else 5
-    confidence = float(min(100, max(60, score)))
+    confidence = float(min(100, max(55 if weak_momentum else 60, score)))
+    if weak_momentum:
+        confidence = max(50.0, confidence - 5)
 
     return {
         "action": direction,
@@ -1437,6 +1439,7 @@ def micro_scalp_layer(df_5m, df_15m, df_1h, df_4h, human_layer: Dict[str, Any]) 
         "atr15": atr15_val,
         "htf_direction": htf_direction,
         "reasoning": human_layer.get("explanation", []),
+        "debug_relaxed_rules": weak_momentum or not rules_ok,
         "micro_context": {
             "body_dominant": body_dominant,
             "wick_reject": {"bullish": wick_bull, "bearish": wick_bear},
@@ -1469,15 +1472,17 @@ def run_ultra_layer(df_5m, df_15m, df_1h, df_4h, human_layer: Dict[str, Any]) ->
     if trend_15 in ("bullish", "bearish") and (
         (trend_15 == "bullish" and direction == "SELL") or (trend_15 == "bearish" and direction == "BUY")
     ):
-        return {"action": "NO_TRADE", "reason": "15m cannot contradict HTF", "signal_type": "ULTRA", "atr5": atr5_val, "atr15": atr15_val}
+        struct_15 = human_layer.get("structure", {}).get("15m", {})
+        if not (struct_15.get("label") == "HH-HL" and direction == "BUY"):
+            return {"action": "NO_TRADE", "reason": "15m cannot contradict HTF", "signal_type": "ULTRA", "atr5": atr5_val, "atr15": atr15_val}
 
     adx5_val = _safe_float(last5.get("adx"), 0)
     adx15_val = _safe_float(last15.get("adx"), 0)
-    if adx5_val is not None and adx15_val is not None and (adx5_val < 20 or adx15_val < 20):
-        return {"action": "NO_TRADE", "reason": "weak momentum", "signal_type": "ULTRA", "atr5": atr5_val, "atr15": atr15_val}
+    weak_momentum = (adx5_val or 0) < 20 or (adx15_val or 0) < 20
+    relaxed = weak_momentum
 
     ltf_blocked, ltf_reason = _ltf_structure_block(direction, human_layer)
-    if ltf_blocked:
+    if ltf_blocked and not (human_layer.get("structure", {}).get("15m", {}).get("label") == "HH-HL" and direction == "BUY"):
         return {"action": "NO_TRADE", "reason": ltf_reason, "signal_type": "ULTRA", "atr5": atr5_val, "atr15": atr15_val}
 
     low_vol, vol_ctx = _is_low_volatility(atr5_val, atr15_val)
@@ -1519,10 +1524,10 @@ def run_ultra_layer(df_5m, df_15m, df_1h, df_4h, human_layer: Dict[str, Any]) ->
         "channels": channel_ok,
         "bos": bos_ok,
         "wick": wick_ok,
-        "momentum": _safe_float(last5.get("adx"), 0) >= 20 and _safe_float(last15.get("adx"), 0) >= 20,
+        "momentum": not weak_momentum,
     }
     score, breakdown = _score_trade(score_ctx)
-    action = direction if score >= 60 else "NO_TRADE"
+    action = direction if score >= 50 or relaxed else direction if score >= 60 else "NO_TRADE"
 
     risk, rr = _risk_reward(price, sl, tp1, direction)
     if rr is not None and rr <= 1.0:
@@ -1536,7 +1541,8 @@ def run_ultra_layer(df_5m, df_15m, df_1h, df_4h, human_layer: Dict[str, Any]) ->
     if not quality_ok:
         return {"action": "NO_TRADE", "reason": quality_reason, "signal_type": "ULTRA", "atr5": atr5_val, "atr15": atr15_val}
 
-    confidence = float(min(100, max(60, score))) if action != "NO_TRADE" else float(min(score, 60))
+    confidence_base = float(min(100, max(55 if relaxed else 60, score)))
+    confidence = confidence_base - 10 if weak_momentum else confidence_base
 
     return {
         "action": action,
@@ -1554,6 +1560,7 @@ def run_ultra_layer(df_5m, df_15m, df_1h, df_4h, human_layer: Dict[str, Any]) ->
         "atr5": atr5_val,
         "atr15": atr15_val,
         "reasoning": human_layer.get("explanation", []),
+        "debug_relaxed_rules": relaxed,
     }
 
 
@@ -1586,11 +1593,11 @@ def run_ultra_v3_layer(df_5m, df_15m, df_1h, df_4h, human_layer: Dict[str, Any])
 
     adx5_val = _safe_float(last5.get("adx"), 0)
     adx15_val = _safe_float(last15.get("adx"), 0)
-    if adx5_val is not None and adx15_val is not None and (adx5_val < 20 or adx15_val < 20):
-        return {"action": "NO_TRADE", "reason": "weak momentum", "signal_type": "ULTRA_V3"}
+    weak_momentum = (adx5_val or 0) < 20 or (adx15_val or 0) < 20
+    relaxed = weak_momentum
 
     ltf_blocked, ltf_reason = _ltf_structure_block(direction, human_layer)
-    if ltf_blocked:
+    if ltf_blocked and not (human_layer.get("structure", {}).get("15m", {}).get("label") == "HH-HL" and direction == "BUY"):
         return {"action": "NO_TRADE", "reason": ltf_reason, "signal_type": "ULTRA_V3"}
 
     low_vol, vol_ctx = _is_low_volatility(atr5_val, atr15_val)
@@ -1635,10 +1642,10 @@ def run_ultra_v3_layer(df_5m, df_15m, df_1h, df_4h, human_layer: Dict[str, Any])
         "channels": channel_ok,
         "bos": bos_ok,
         "wick": wick_ok,
-        "momentum": _safe_float(last5.get("adx"), 0) >= 20 and _safe_float(last15.get("adx"), 0) >= 20,
+        "momentum": not weak_momentum,
     }
     score, breakdown = _score_trade(score_ctx)
-    action = direction if score >= 60 else "NO_TRADE"
+    action = direction if score >= 50 or relaxed else direction if score >= 60 else "NO_TRADE"
 
     risk, rr = _risk_reward(price, sl, tp1, direction)
     if rr is not None and rr <= 1.0:
@@ -1652,7 +1659,8 @@ def run_ultra_v3_layer(df_5m, df_15m, df_1h, df_4h, human_layer: Dict[str, Any])
     if not quality_ok:
         return {"action": "NO_TRADE", "reason": quality_reason, "signal_type": "ULTRA_V3"}
 
-    confidence = float(min(100, max(60, score))) if action != "NO_TRADE" else float(min(score, 60))
+    confidence_base = float(min(100, max(55 if relaxed else 60, score)))
+    confidence = confidence_base - 10 if weak_momentum else confidence_base
 
     return {
         "action": action,
@@ -1670,6 +1678,7 @@ def run_ultra_v3_layer(df_5m, df_15m, df_1h, df_4h, human_layer: Dict[str, Any])
         "atr5": atr5_val,
         "atr15": atr15_val,
         "reasoning": human_layer.get("explanation", []),
+        "debug_relaxed_rules": relaxed,
     }
 
 
@@ -1736,8 +1745,6 @@ def consolidate_signals(
         if master_direction != "NO_TRADE" and action != master_direction:
             continue
         risk, rr = _risk_reward(layer.get("entry"), layer.get("sl"), layer.get("tp1") or layer.get("tp"), action)
-        if rr is None or rr <= 1.0:
-            continue
         score = layer.get("score", 0)
         confidence = _safe_float(layer.get("confidence"), 0) or 0
         priority = 1 if (name == "MICRO_SCALP" and score >= 70) else 0
@@ -1756,6 +1763,26 @@ def consolidate_signals(
         )
 
     if not candidates:
+        fallback_layers = [("ICT", ict_layer), ("MICRO_SCALP", micro_layer), ("SCALP", scalp_layer), ("ULTRA_V3", v3_layer), ("ULTRA", ultra_layer)]
+        for name, layer in fallback_layers:
+            act = _sanitize_action(layer.get("action"))
+            entry = _safe_float(layer.get("entry"), None)
+            sl = _safe_float(layer.get("sl"), None)
+            tp1 = _safe_float(layer.get("tp1") or layer.get("tp"), None)
+            if act in ("BUY", "SELL") and entry is not None and sl is not None and tp1 is not None:
+                final = dict(layer)
+                final["signal_type"] = "UNIFIED"
+                final["htf_direction"] = master_direction
+                final["layers"] = {
+                    "human": human_layer,
+                    "ict": ict_layer,
+                    "micro_scalp": micro_layer,
+                    "scalp": scalp_layer,
+                    "ultra": ultra_layer,
+                    "ultra_v3": v3_layer,
+                }
+                final["debug_relaxed_rules"] = final.get("debug_relaxed_rules", False) or ict_layer.get("debug_relaxed_rules") or False
+                return final
         return {
             "action": "NO_TRADE",
             "reason": "No aligned signals after consolidation",
@@ -1789,6 +1816,7 @@ def consolidate_signals(
         "ultra": ultra_layer,
         "ultra_v3": v3_layer,
     }
+    final["debug_relaxed_rules"] = final.get("debug_relaxed_rules", False) or ict_layer.get("debug_relaxed_rules") or micro_layer.get("debug_relaxed_rules") or scalp_layer.get("debug_relaxed_rules") or ultra_layer.get("debug_relaxed_rules") or v3_layer.get("debug_relaxed_rules") or False
     if final["action"] in ("BUY", "SELL") and entry is not None:
         validation_error = _validate_final_signal(final)
         if validation_error:
