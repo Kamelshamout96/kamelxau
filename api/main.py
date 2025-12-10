@@ -21,6 +21,7 @@ TG_CHAT = os.getenv("TG_CHAT")
 FORWARD_CHANNEL_ID = -1002938646549
 DATA_DIR = Path("data")
 LAST_SIGNAL_FILE = DATA_DIR / "last_signal.json"
+POLL_OFFSET_FILE = DATA_DIR / "telegram_poll_offset.txt"
 DATA_DIR.mkdir(exist_ok=True)
 
 
@@ -36,6 +37,22 @@ def _load_last_signal() -> dict:
 def _save_last_signal(signal: dict) -> None:
     try:
         LAST_SIGNAL_FILE.write_text(json.dumps(signal))
+    except Exception:
+        return
+
+
+def _load_poll_offset() -> int | None:
+    try:
+        if POLL_OFFSET_FILE.exists():
+            return int(POLL_OFFSET_FILE.read_text().strip() or "0")
+    except Exception:
+        return None
+    return None
+
+
+def _save_poll_offset(offset: int) -> None:
+    try:
+        POLL_OFFSET_FILE.write_text(str(offset))
     except Exception:
         return
 
@@ -283,3 +300,45 @@ async def telegram_incoming(update: dict):
         pass
 
     return {"status": "error"}
+
+
+@app.get("/telegram/poll-forward")
+def telegram_poll_forward():
+    """
+    Poll Telegram getUpdates (for setups without webhooks) and forward any messages to the channel.
+    Maintains offset on disk to avoid reprocessing.
+    """
+    if not TG_TOKEN:
+        return {"status": "ignored", "detail": "missing token"}
+
+    offset = _load_poll_offset()
+    params = {"timeout": 0}
+    if offset is not None:
+        params["offset"] = offset
+
+    try:
+        url = f"https://api.telegram.org/bot{TG_TOKEN}/getUpdates"
+        resp = requests.get(url, params=params, timeout=15)
+        if resp.status_code != 200:
+            return {"status": "error", "code": resp.status_code, "detail": resp.text}
+
+        data = resp.json()
+        updates = data.get("result", [])
+
+        last_update_id = offset
+        count = 0
+        for upd in updates:
+            forward_to_channel(upd)
+            try:
+                if "update_id" in upd:
+                    last_update_id = upd["update_id"]
+            except Exception:
+                pass
+            count += 1
+
+        if last_update_id is not None and count > 0:
+            _save_poll_offset(int(last_update_id) + 1)
+
+        return {"status": "forwarded", "count": count}
+    except Exception as e:
+        return {"status": "error", "detail": str(e)}
