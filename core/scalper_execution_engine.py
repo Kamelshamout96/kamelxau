@@ -82,6 +82,7 @@ class ScalperExecutionEngine:
             except:
                 # fast ATR fallback
                 import numpy as np
+                import pandas as pd
 
                 def fast_atr(df, period=14):
                     tr = np.maximum.reduce(
@@ -91,7 +92,8 @@ class ScalperExecutionEngine:
                             abs(df["low"] - df["close"].shift(1)),
                         ]
                     )
-                    return tr.rolling(period).mean().iloc[-1]
+                    tr_series = pd.Series(tr, index=df.index)
+                    return tr_series.rolling(period).mean().iloc[-1]
 
                 atr = float(fast_atr(df_5m))
 
