@@ -2,10 +2,8 @@ import json
 import os
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
 
 import pandas as pd
-import requests
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 
@@ -18,10 +16,8 @@ app = FastAPI()
 
 TG_TOKEN = os.getenv("TG_TOKEN")
 TG_CHAT = os.getenv("TG_CHAT")
-FORWARD_CHANNEL_ID = -1002938646549
 DATA_DIR = Path("data")
 LAST_SIGNAL_FILE = DATA_DIR / "last_signal.json"
-POLL_OFFSET_FILE = DATA_DIR / "telegram_poll_offset.txt"
 DATA_DIR.mkdir(exist_ok=True)
 
 
@@ -41,22 +37,6 @@ def _save_last_signal(signal: dict) -> None:
         return
 
 
-def _load_poll_offset() -> int | None:
-    try:
-        if POLL_OFFSET_FILE.exists():
-            return int(POLL_OFFSET_FILE.read_text().strip() or "0")
-    except Exception:
-        return None
-    return None
-
-
-def _save_poll_offset(offset: int) -> None:
-    try:
-        POLL_OFFSET_FILE.write_text(str(offset))
-    except Exception:
-        return
-
-
 def _fallback_history() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     hist = update_history()
     candles_5m = hist
@@ -64,92 +44,6 @@ def _fallback_history() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.Da
     candles_1h = hist.resample("60min").agg({"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}).dropna()
     candles_4h = hist.resample("240min").agg({"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}).dropna()
     return candles_5m, candles_15m, candles_1h, candles_4h
-
-
-def forward_to_channel(update: Any) -> None:
-    """
-    Forward any incoming Telegram message to the configured broadcast channel.
-    Uses forwardMessage so media and formatting stay intact.
-    """
-    if not TG_TOKEN:
-        return
-
-    try:
-        # Handle both single-update payloads and bulk getUpdates-style payloads
-        updates = []
-        if isinstance(update, list):
-            updates = update
-        elif isinstance(update, dict):
-            if isinstance(update.get("result"), list):
-                updates = update.get("result", [])
-            elif isinstance(update.get("updates"), list):  # alternate wrapper
-                updates = update.get("updates", [])
-            elif "update" in update and isinstance(update.get("update"), dict):
-                updates = [update.get("update")]
-            else:
-                updates = [update]
-        else:
-            updates = [update]
-
-        for upd in updates:
-            message = None
-            for key in ("message", "edited_message", "channel_post", "edited_channel_post"):
-                if key in upd and upd.get(key):
-                    message = upd[key]
-                    break
-
-            if not message:
-                continue
-
-            from_chat_id = message.get("chat", {}).get("id")
-            message_id = message.get("message_id")
-
-            if from_chat_id is None or message_id is None:
-                try:
-                    print("Skipping update: missing chat.id or message_id")
-                except Exception:
-                    pass
-                continue
-
-            if from_chat_id == FORWARD_CHANNEL_ID:
-                continue
-
-            url = f"https://api.telegram.org/bot{TG_TOKEN}/forwardMessage"
-            payload = {"chat_id": FORWARD_CHANNEL_ID, "from_chat_id": from_chat_id, "message_id": message_id}
-            try:
-                try:
-                    print(f"Forwarding msg {message_id} from {from_chat_id} to {FORWARD_CHANNEL_ID}")
-                except Exception:
-                    pass
-                # Use form payload for full Bot API compatibility
-                resp = requests.post(url, data=payload, timeout=10)
-                if resp.status_code >= 400:
-                    try:
-                        detail = None
-                        try:
-                            detail = resp.json()
-                        except Exception:
-                            detail = resp.text
-                        print(f"Warning: forwardMessage failed ({resp.status_code}) for msg {message_id}: {detail}")
-                    except Exception:
-                        pass
-                else:
-                    try:
-                        detail = None
-                        try:
-                            detail = resp.json()
-                        except Exception:
-                            detail = resp.text
-                        print(f"Forwarded msg {message_id} status={resp.status_code} resp={detail}")
-                    except Exception:
-                        pass
-            except Exception:
-                continue
-    except Exception:
-        try:
-            print("Warning: failed to forward Telegram update")
-        except Exception:
-            pass
 
 
 @app.get("/")
@@ -265,80 +159,3 @@ def run_signal():
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/telegram/update")
-async def telegram_update(update: Any):
-    try:
-        print("Received Telegram update for forwarding")
-    except Exception:
-        pass
-    forward_to_channel(update)
-    return {"ok": True}
-
-
-@app.post("/telegram/incoming")
-async def telegram_incoming(update: dict):
-    if not TG_TOKEN:
-        return {"status": "ignored"}
-
-    message = update.get("message")
-    if not message:
-        return {"status": "ignored"}
-
-    from_chat_id = message.get("chat", {}).get("id")
-    message_id = message.get("message_id")
-
-    if from_chat_id is None or message_id is None:
-        return {"status": "ignored"}
-
-    try:
-        url = f"https://api.telegram.org/bot{TG_TOKEN}/forwardMessage"
-        params = {"chat_id": FORWARD_CHANNEL_ID, "from_chat_id": from_chat_id, "message_id": message_id}
-        resp = requests.get(url, params=params, timeout=10)
-        if resp.status_code == 200:
-            return {"status": "forwarded"}
-    except Exception:
-        pass
-
-    return {"status": "error"}
-
-
-@app.get("/telegram/poll-forward")
-def telegram_poll_forward():
-    """
-    Poll Telegram getUpdates (for setups without webhooks) and forward any messages to the channel.
-    Maintains offset on disk to avoid reprocessing.
-    """
-    if not TG_TOKEN:
-        return {"status": "ignored", "detail": "missing token"}
-
-    offset = _load_poll_offset()
-    params = {"timeout": 0}
-    if offset is not None:
-        params["offset"] = offset
-
-    try:
-        url = f"https://api.telegram.org/bot{TG_TOKEN}/getUpdates"
-        resp = requests.get(url, params=params, timeout=15)
-        if resp.status_code != 200:
-            return {"status": "error", "code": resp.status_code, "detail": resp.text}
-
-        data = resp.json()
-        updates = data.get("result", [])
-
-        last_update_id = offset
-        count = 0
-        for upd in updates:
-            forward_to_channel(upd)
-            try:
-                if "update_id" in upd:
-                    last_update_id = upd["update_id"]
-            except Exception:
-                pass
-            count += 1
-
-        if last_update_id is not None and count > 0:
-            _save_poll_offset(int(last_update_id) + 1)
-
-        return {"status": "forwarded", "count": count}
-    except Exception as e:
-        return {"status": "error", "detail": str(e)}

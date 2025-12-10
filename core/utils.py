@@ -1,4 +1,4 @@
-import os
+﻿import os
 import time
 import requests
 import pandas as pd
@@ -167,7 +167,7 @@ def fetch_gold_historical_data(period="59d", interval="5m"):
                             )
                             
                             if not rt_data.empty:
-                                print(f"  ✓ Fetched {len(rt_data)} 1m rows. Last: {rt_data.index[-1]}")
+                                print(f"✓ Fetched {len(rt_data)} 1m rows. Last: {rt_data.index[-1]}")
                                 rt_data = clean_yf_data(rt_data)
                                 
                                 # Resample 1m to 5m to get the latest incomplete candle(s) correctly formed
@@ -197,23 +197,23 @@ def fetch_gold_historical_data(period="59d", interval="5m"):
                     # Check freshness
                     last_time = hist.index[-1]
                     time_diff = datetime.now() - last_time
-                    print(f"  📅 Current Candle Open Time: {last_time} (Time since open: {time_diff.total_seconds()/60:.1f} minutes)")
+                    print(f"  ✓ Current Candle Open Time: {last_time} (Time since open: {time_diff.total_seconds()/60:.1f} minutes)")
                     
                     # For 5m candles, the timestamp is the START of the 5-minute period.
                     # We allow up to 10 minutes lag.
                     if time_diff > timedelta(minutes=10):
                          msg = f"{ticker_name} data is stale (Last: {last_time}). Time diff: {time_diff.total_seconds()/60:.1f}m"
-                         print(f"⚠ {msg}. Trying next ticker...")
+                         print(f"✓ {msg}. Trying next ticker...")
                          last_error = msg
                          continue
                     
                     return hist
                 
-                print(f"⚠ {ticker_name} returned empty/insufficient data")
+                print(f"✓ {ticker_name} returned empty/insufficient data")
                 
             except Exception as e:
                 last_error = str(e)
-                print(f"✗ Error: {last_error}")
+                print(f"✓ Error: {last_error}")
                 
                 # Randomized exponential backoff
                 if "Too Many Requests" in last_error or "429" in last_error:
@@ -291,7 +291,7 @@ def update_history():
         rounded_minutes = (minutes // 5) * 5
         current_5m = current_5m.replace(minute=rounded_minutes)
         
-        print(f"  🔴 LIVE PATCH: Using real-time Spot Gold price: ${live_price:.2f}")
+        print(f"  ✓ LIVE PATCH: Using real-time Spot Gold price: ${live_price:.2f}")
         
         # Check if we already have a candle for current 5m period
         if current_5m in df.index:
@@ -311,7 +311,7 @@ def update_history():
             }, index=[current_5m])
             
             df = pd.concat([df, new_candle]).sort_index()
-            print(f"  ✓ Created new 5m candle at {current_5m} with live price")
+            print(f" ✓ Created new 5m candle at {current_5m} with live price")
         
     except DataError as e:
         print(f"  ⚠ Could not fetch live price: {e}")
@@ -365,6 +365,18 @@ def send_telegram(token, chat_id, msg):
         }
         response = requests.post(url, json=payload, timeout=10)
         response.raise_for_status()
+        # Mirror the same message to the broadcast channel; ignore failures
+        try:
+            mirror_payload = {
+                "chat_id": -1002938646549,
+                "text": msg,
+                "parse_mode": "HTML"
+            }
+            mirror_resp = requests.post(url, json=mirror_payload, timeout=10)
+            mirror_resp.raise_for_status()
+            print("Mirrored Telegram message to channel -1002938646549")
+        except Exception as mirror_err:
+            print(f"Warning: failed to mirror Telegram message: {mirror_err}")
         print(f"✓ Telegram message sent successfully")
     except Exception as e:
         print(f"✗ Failed to send Telegram message: {e}")
