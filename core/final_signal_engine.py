@@ -1,6 +1,6 @@
 """
 FinalSignalEngine: orchestrates Stage 1 (analysis/bias) and Stage 2 (execution),
-plus duplicate prevention, and emits the final trading signal.
+plus duplicate prevention, fallback light mode, and emits the final trading signal.
 """
 
 from __future__ import annotations
@@ -31,11 +31,13 @@ class FinalSignalEngine:
         self.dup_engine = DuplicatePreventionEngine()
         self.last_signal_time = None
         self.fallback_timeout = timedelta(minutes=30)
+        self.fallback_timeout_light = timedelta(minutes=4)
 
     def run(self, df_5m, df_15m, df_1h, df_4h) -> Dict[str, Any]:
         analysis = self.analysis_engine.analyze(df_5m, df_15m, df_1h, df_4h)
         bias = analysis.bias
         ctx = analysis.context
+        ctx["momentum"] = ctx.get("momentum", "unknown")
 
         signal, exec_ctx = self.scalper_engine.evaluate(
             bias=bias,
@@ -54,24 +56,25 @@ class FinalSignalEngine:
                 "structure_tag": exec_ctx.get("structure_tag"),
                 "sweep_tag": exec_ctx.get("sweep_tag"),
                 "poi_tag": exec_ctx.get("poi_tag"),
-                "momentum": exec_ctx.get("sweeps", {}),
+                "momentum": ctx.get("momentum", "unknown"),
             },
         )
         if block:
             return {"action": "NO_TRADE", "reason": "duplicate_block", "analysis": analysis.context}
 
-        if bias == "NEUTRAL" and signal.get("action") in ("BUY", "SELL"):
-            signal["action"] = "NO_TRADE"
-            signal["reason"] = "bias_neutral"
-
-        # Fallback: only if Stage2 gave NO_TRADE, bias not neutral, and timeout elapsed
+        force_fallback = False
         last_time = df_5m.index[-1] if len(df_5m) else None
-        if (
-            signal.get("action") == "NO_TRADE"
-            and bias != "NEUTRAL"
-            and last_time is not None
-            and (self.last_signal_time is None or (last_time - self.last_signal_time) >= self.fallback_timeout)
-        ):
+        if signal.get("action") == "NO_TRADE" and last_time is not None:
+            if self.last_signal_time is None or (last_time - self.last_signal_time) >= self.fallback_timeout_light:
+                force_fallback = True
+
+        # Only block primary BUY/SELL when bias is neutral
+        if not force_fallback:
+            if bias == "NEUTRAL" and signal.get("action") in ("BUY", "SELL"):
+                signal["action"] = "NO_TRADE"
+                signal["reason"] = "bias_neutral"
+
+        if force_fallback and signal.get("action") == "NO_TRADE" and last_time is not None:
             price = float(df_5m.iloc[-1]["close"])
             last_candle = df_5m.iloc[-1]
             sweeps_ctx = ctx["sweeps"]
@@ -93,7 +96,7 @@ class FinalSignalEngine:
             action_fb = "NO_TRADE"
             sl = tp1 = tp2 = tp3 = None
 
-            if bias == "BUY ONLY" and _in_zone(demand_zone) and bullish_candle and not bear_sweep and momentum_ok:
+            if _in_zone(demand_zone) and bullish_candle and not bear_sweep and momentum_ok and bias in ("BUY ONLY", "NEUTRAL"):
                 action_fb = "BUY"
                 lows = pools.get("lows", [])
                 highs = pools.get("highs", [])
@@ -101,7 +104,7 @@ class FinalSignalEngine:
                 tp1 = min([h for h in highs if h > price], default=price * 1.001)
                 tp2 = min([h for h in highs if h > tp1], default=tp1 * 1.001)
                 tp3 = min([h for h in highs if h > tp2], default=tp2 * 1.001)
-            elif bias == "SELL ONLY" and _in_zone(supply_zone) and bearish_candle and not bull_sweep and momentum_ok:
+            elif _in_zone(supply_zone) and bearish_candle and not bull_sweep and momentum_ok and bias in ("SELL ONLY", "NEUTRAL"):
                 action_fb = "SELL"
                 highs = pools.get("highs", [])
                 lows = pools.get("lows", [])
@@ -129,7 +132,7 @@ class FinalSignalEngine:
                     "poi_tag": "bull" if action_fb == "BUY" else "bear",
                     "momentum": momentum_state,
                 }
-                block_fb = self.dup_engine.should_block(fb_signal, fb_context)
+                block_fb = self.dup_engine.should_block(fb_signal, fb_context, price_delta_override=0.2)
                 if block_fb:
                     return {"action": "NO_TRADE", "reason": "duplicate_block", "analysis": analysis.context}
                 signal = fb_signal

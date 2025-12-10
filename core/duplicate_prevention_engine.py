@@ -21,7 +21,7 @@ class DuplicateState:
 
 @dataclass
 class DuplicateConfig:
-    min_price_delta: float = 0.5  # configurable tolerance
+    min_price_delta: float = 0.5  # default tolerance
 
 
 class DuplicatePreventionEngine:
@@ -29,7 +29,7 @@ class DuplicatePreventionEngine:
         self.cfg = config or DuplicateConfig()
         self.state = DuplicateState()
 
-    def should_block(self, signal: Dict[str, Any], context: Dict[str, Any]) -> bool:
+    def should_block(self, signal: Dict[str, Any], context: Dict[str, Any], price_delta_override: float | None = None) -> bool:
         action = signal.get("action")
         price = signal.get("entry")
         time_idx = context.get("time")
@@ -49,7 +49,8 @@ class DuplicatePreventionEngine:
             if s.last_sweep == sweep_tag or s.last_poi == poi_tag:
                 return True
         if s.last_action == action and s.last_price is not None and price is not None:
-            if abs(float(price) - float(s.last_price)) < self.cfg.min_price_delta:
+            min_delta = price_delta_override if price_delta_override is not None else self.cfg.min_price_delta
+            if abs(float(price) - float(s.last_price)) < min_delta:
                 return True
         if s.last_momentum == momentum and s.last_action == action:
             return True
