@@ -88,6 +88,10 @@ def forward_to_channel(update: Any) -> None:
             message_id = message.get("message_id")
 
             if from_chat_id is None or message_id is None:
+                try:
+                    print("Skipping update: missing chat.id or message_id")
+                except Exception:
+                    pass
                 continue
 
             if from_chat_id == FORWARD_CHANNEL_ID:
@@ -96,11 +100,30 @@ def forward_to_channel(update: Any) -> None:
             url = f"https://api.telegram.org/bot{TG_TOKEN}/forwardMessage"
             payload = {"chat_id": FORWARD_CHANNEL_ID, "from_chat_id": from_chat_id, "message_id": message_id}
             try:
+                try:
+                    print(f"Forwarding msg {message_id} from {from_chat_id} to {FORWARD_CHANNEL_ID}")
+                except Exception:
+                    pass
                 # Use form payload for full Bot API compatibility
                 resp = requests.post(url, data=payload, timeout=10)
                 if resp.status_code >= 400:
                     try:
-                        print(f"Warning: forwardMessage failed ({resp.status_code}) for msg {message_id}: {resp.text}")
+                        detail = None
+                        try:
+                            detail = resp.json()
+                        except Exception:
+                            detail = resp.text
+                        print(f"Warning: forwardMessage failed ({resp.status_code}) for msg {message_id}: {detail}")
+                    except Exception:
+                        pass
+                else:
+                    try:
+                        detail = None
+                        try:
+                            detail = resp.json()
+                        except Exception:
+                            detail = resp.text
+                        print(f"Forwarded msg {message_id} status={resp.status_code} resp={detail}")
                     except Exception:
                         pass
             except Exception:
@@ -227,5 +250,9 @@ def run_signal():
 
 @app.post("/telegram/update")
 async def telegram_update(update: Any):
+    try:
+        print("Received Telegram update for forwarding")
+    except Exception:
+        pass
     forward_to_channel(update)
     return {"ok": True}
