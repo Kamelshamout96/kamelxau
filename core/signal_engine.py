@@ -1434,9 +1434,10 @@ def micro_scalp_layer(df_5m, df_15m, df_1h, df_4h, human_layer: Dict[str, Any]) 
             "trend": {"4h": trend_4h, "1h": trend_1h},
         }
 
+    score_penalty = 0
     # BOS / zone filters cannot be bypassed by relaxed momentum
     if direction == "BUY" and bos15.get("direction") == "bearish":
-        score -= 25
+        score_penalty += 25
         if not (wick_bull or sweep.get("type") == "below"):
             return {
                 "action": "NO_TRADE",
@@ -1464,6 +1465,7 @@ def micro_scalp_layer(df_5m, df_15m, df_1h, df_4h, human_layer: Dict[str, Any]) 
     score += 10 if wick_ok else 0
     score += 10 if sweep_ok else 0
     score += 10 if micro_bias == ("bullish" if direction == "BUY" else "bearish") else 5
+    score = max(0, score - score_penalty)
     confidence = float(min(100, max(55 if weak_momentum else 60, score)))
     if weak_momentum:
         confidence = max(50.0, confidence - 5)
