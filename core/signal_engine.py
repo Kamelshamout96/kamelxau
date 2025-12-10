@@ -1,9 +1,11 @@
 import math
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
 
-_LAST_SIGNAL_STATE: Dict[str, Optional[float]] = {"entry": None, "action": None}
+_LAST_SIGNAL_STATE: Dict[str, Optional[float]] = {"entry": None, "action": None, "ts": None}
 _DUPLICATE_BAND = 2.0  # USD band to block duplicate alerts
+_DUPLICATE_WINDOW_SEC = 6 * 60  # 6 minutes window for duplicate suppression
 
 
 def _safe_float(val: Any, default: Optional[float] = None) -> Optional[float]:
@@ -163,6 +165,14 @@ def _compute_adx_conf(adx5, adx15, adx1h=None, adx4h=None):
         conf = "HIGH"
 
     return conf, tier5, tier15, tier1h, tier4h
+
+
+def _is_low_volatility(atr5: Any, atr15: Any) -> Tuple[bool, Dict[str, Optional[float]]]:
+    a5 = _safe_float(atr5, None)
+    a15 = _safe_float(atr15, None)
+    if a5 is None or a15 is None:
+        return True, {"atr5": a5, "atr15": a15}
+    return (a5 < 0.8 or a15 < 1.2), {"atr5": a5, "atr15": a15}
 
 
 def _local_swings(df, lookback=20, window=2):
@@ -406,6 +416,9 @@ def _sanitize_levels(
     tps: List[Optional[float]],
     atr1h: float,
     atr5: float,
+    swing_low: Optional[float] = None,
+    swing_high: Optional[float] = None,
+    channel_bounds: Optional[Dict[str, float]] = None,
 ) -> Tuple[float, List[float]]:
     """Ensure SL/TP respect BUY/SELL geometry and sanitize NaN/None."""
     action = _sanitize_action(action)
@@ -419,14 +432,36 @@ def _sanitize_levels(
     min_sl_dist = max(ref_sl_atr * 0.8, 2.5)
     max_sl_dist = max(min_sl_dist, min(ref_sl_atr * 2.0, 15.0))
     min_tp_dist = min(ref_tp_atr * 0.8, 2.5)
+    min_tp1_diff = max(2.0, ref_tp_atr * 0.5 if ref_tp_atr else 2.0)
+    override_tp1_diff = max(2.0, ref_tp_atr * 0.7 if ref_tp_atr else 2.0)
+    soft_sl_cap = 18.0
+    channel_lower = channel_bounds.get("lower") if channel_bounds else None
+    channel_upper = channel_bounds.get("upper") if channel_bounds else None
 
     if action == "BUY":
         candidate_sl = _safe_float(sl)
+        structural_source = False
+        channel_source = False
+        if swing_low is not None:
+            structural_source = True
+            candidate_sl = swing_low if candidate_sl is None else min(candidate_sl, swing_low)
+        if not structural_source and channel_lower is not None:
+            channel_source = True
+            candidate_sl = channel_lower if candidate_sl is None else min(candidate_sl, channel_lower)
         if candidate_sl is None or candidate_sl >= entry:
             candidate_sl = entry - min_sl_dist
         sl_dist = entry - candidate_sl
-        sl_dist = min(max(sl_dist, min_sl_dist), max_sl_dist)
-        safe_sl = entry - sl_dist
+        if not structural_source and not channel_source:
+            sl_dist = min(max(sl_dist, min_sl_dist), max_sl_dist)
+            safe_sl = entry - sl_dist
+        else:
+            if sl_dist < min_sl_dist:
+                candidate_sl = entry - min_sl_dist
+            safe_sl = candidate_sl
+        soft_floor = entry - soft_sl_cap
+        if safe_sl < soft_floor:
+            if (swing_low is None or soft_floor <= swing_low) and (channel_lower is None or soft_floor <= channel_lower):
+                safe_sl = soft_floor
 
         raw_tps = []
         for tp in tps:
@@ -437,16 +472,35 @@ def _sanitize_levels(
         while len(raw_tps) < 3:
             raw_tps.append(entry + min_tp_dist)
         tp1 = max(raw_tps[0], entry + min_tp_dist)
+        if tp1 - entry < min_tp1_diff:
+            tp1 = entry + override_tp1_diff
         tp2 = max(raw_tps[1], tp1 + 2)
         tp3 = max(raw_tps[2], tp2 + 2)
         safe_tps = [tp1, tp2, tp3]
     else:
         candidate_sl = _safe_float(sl)
+        structural_source = False
+        channel_source = False
+        if swing_high is not None:
+            structural_source = True
+            candidate_sl = swing_high if candidate_sl is None else max(candidate_sl, swing_high)
+        if not structural_source and channel_upper is not None:
+            channel_source = True
+            candidate_sl = channel_upper if candidate_sl is None else max(candidate_sl, channel_upper)
         if candidate_sl is None or candidate_sl <= entry:
             candidate_sl = entry + min_sl_dist
         sl_dist = candidate_sl - entry
-        sl_dist = min(max(sl_dist, min_sl_dist), max_sl_dist)
-        safe_sl = entry + sl_dist
+        if not structural_source and not channel_source:
+            sl_dist = min(max(sl_dist, min_sl_dist), max_sl_dist)
+            safe_sl = entry + sl_dist
+        else:
+            if sl_dist < min_sl_dist:
+                candidate_sl = entry + min_sl_dist
+            safe_sl = candidate_sl
+        soft_ceiling = entry + soft_sl_cap
+        if safe_sl > soft_ceiling:
+            if (swing_high is None or soft_ceiling >= swing_high) and (channel_upper is None or soft_ceiling >= channel_upper):
+                safe_sl = soft_ceiling
 
         raw_tps = []
         for tp in tps:
@@ -457,9 +511,17 @@ def _sanitize_levels(
         while len(raw_tps) < 3:
             raw_tps.append(entry - min_tp_dist)
         tp1 = min(raw_tps[0], entry - min_tp_dist)
+        if entry - tp1 < min_tp1_diff:
+            tp1 = entry - override_tp1_diff
         tp2 = min(raw_tps[1], tp1 - 2)
         tp3 = min(raw_tps[2], tp2 - 2)
         safe_tps = [tp1, tp2, tp3]
+    if action == "BUY":
+        safe_sl = safe_sl if safe_sl < entry else entry - min_sl_dist
+        safe_tps = [tp if tp > entry else entry + min_tp_dist for tp in safe_tps]
+    else:
+        safe_sl = safe_sl if safe_sl > entry else entry + min_sl_dist
+        safe_tps = [tp if tp < entry else entry - min_tp_dist for tp in safe_tps]
     safe_tps = _order_tps(action, [round(float(tp), 2) for tp in safe_tps])
     return round(float(safe_sl), 2), safe_tps
 
@@ -474,8 +536,10 @@ def _order_tps(action: str, tps: List[float]) -> List[float]:
 def _should_block_duplicate(entry: float, action: str) -> bool:
     last_entry = _LAST_SIGNAL_STATE.get("entry")
     last_action = _LAST_SIGNAL_STATE.get("action")
-    if last_entry is not None and last_action == action:
-        if abs(float(entry) - float(last_entry)) <= _DUPLICATE_BAND:
+    last_ts = _LAST_SIGNAL_STATE.get("ts")
+    now = time.time()
+    if last_entry is not None and last_action == action and last_ts:
+        if abs(float(entry) - float(last_entry)) < _DUPLICATE_BAND and (now - float(last_ts)) <= _DUPLICATE_WINDOW_SEC:
             return True
     return False
 
@@ -483,6 +547,45 @@ def _should_block_duplicate(entry: float, action: str) -> bool:
 def _record_signal(entry: float, action: str) -> None:
     _LAST_SIGNAL_STATE["entry"] = float(entry)
     _LAST_SIGNAL_STATE["action"] = action
+    _LAST_SIGNAL_STATE["ts"] = time.time()
+
+
+def _validate_final_signal(final: Dict[str, Any]) -> Optional[str]:
+    action = _sanitize_action(final.get("action"))
+    if action not in ("BUY", "SELL"):
+        return "invalid action"
+    htf_dir = _sanitize_action(final.get("htf_direction"))
+    if htf_dir in ("BUY", "SELL") and htf_dir != action:
+        return "direction mismatch"
+    entry = _safe_float(final.get("entry"), None)
+    sl = _safe_float(final.get("sl"), None)
+    tp1 = _safe_float(final.get("tp1") if final.get("tp1") is not None else final.get("tp"), None)
+    tp2 = _safe_float(final.get("tp2"), None)
+    tp3 = _safe_float(final.get("tp3"), None)
+    atr5 = _safe_float(final.get("atr5"), None)
+    atr15 = _safe_float(final.get("atr15"), None)
+
+    low_vol, _ = _is_low_volatility(atr5, atr15)
+    if low_vol:
+        return "low volatility"
+    if entry is None or sl is None or tp1 is None or tp2 is None or tp3 is None:
+        return "missing levels"
+
+    fallback = max(entry * 0.001, 0.5)
+    ref_tp = atr5 if atr5 and atr5 > 0 else fallback
+    min_tp1_diff = max(2.0, ref_tp * 0.5)
+
+    if action == "BUY":
+        if not (sl < entry < tp1 and tp2 > entry and tp3 > entry):
+            return "invalid geometry"
+        if (tp1 - entry) < min_tp1_diff:
+            return "tp1 too close"
+    else:
+        if not (sl > entry > tp1 and tp2 < entry and tp3 < entry):
+            return "invalid geometry"
+        if (entry - tp1) < min_tp1_diff:
+            return "tp1 too close"
+    return None
 
 
 def _score_trade(context: Dict[str, Any]) -> Tuple[int, Dict[str, int]]:
@@ -515,6 +618,8 @@ def _build_levels(
     swings_15 = _local_swings(df_15m, lookback=60, window=2)
     highs = [h["price"] for h in swings_5.get("highs", []) + swings_15.get("highs", [])]
     lows = [l["price"] for l in swings_5.get("lows", []) + swings_15.get("lows", [])]
+    swing_high = max(highs) if highs else None
+    swing_low = min(lows) if lows else None
 
     sl_level = None
     tp_candidates: List[float] = []
@@ -558,7 +663,17 @@ def _build_levels(
         tp2 = min(tp_candidates) if tp_candidates else entry - atr5 * 1.5
         tp3 = channel_ctx.get("bounds", {}).get("lower", tp2 - atr5)
 
-    sl, tps = _sanitize_levels(direction, entry, sl_level, [tp1, tp2, tp3], atr1h, atr5)
+    sl, tps = _sanitize_levels(
+        direction,
+        entry,
+        sl_level,
+        [tp1, tp2, tp3],
+        atr1h,
+        atr5,
+        swing_low=swing_low,
+        swing_high=swing_high,
+        channel_bounds=channel_ctx.get("bounds"),
+    )
     return sl, tps[0], tps[1], tps[2]
 
 
@@ -625,6 +740,8 @@ def run_scalp_layer(df_5m, df_15m, df_1h, df_4h, human_layer: Dict[str, Any]) ->
     trend_1h = _trend(last1h)
     trend_15 = _trend(last15)
     direction = _final_direction(trend_4h, trend_1h)
+    atr5_val = _safe_float(last5.get("atr"), price * 0.003) or price * 0.003
+    atr15_val = _safe_float(last15.get("atr"), atr5_val) or atr5_val
 
     adx_conf, tier5, tier15, tier1h, tier4h = _compute_adx_conf(
         _safe_float(last5.get("adx"), 0),
@@ -651,15 +768,25 @@ def run_scalp_layer(df_5m, df_15m, df_1h, df_4h, human_layer: Dict[str, Any]) ->
             "trend": {"4h": trend_4h, "1h": trend_1h, "15m": trend_15},
         }
 
+    low_vol, vol_ctx = _is_low_volatility(atr5_val, atr15_val)
+    if direction in ("BUY", "SELL") and low_vol:
+        return {
+            "action": "NO_TRADE",
+            "reason": "low volatility",
+            "signal_type": "SCALP",
+            "trend": {"4h": trend_4h, "1h": trend_1h, "15m": trend_15},
+            "atr5": vol_ctx["atr5"],
+            "atr15": vol_ctx["atr15"],
+        }
+
     sweep5 = _liquidity_sweep(df_5m, lookback=20)
     bos5 = human_layer.get("bos_choch", {}).get("5m", {})
     bos15 = human_layer.get("bos_choch", {}).get("15m", {})
     channel_ctx = _detect_channel_context(df_5m, price)
     zones = human_layer.get("zones", _detect_zones(df_1h))
-    atr5 = _safe_float(last5.get("atr"), price * 0.003) or price * 0.003
-    atr1h = _safe_float(last1h.get("atr"), atr5) or atr5
+    atr1h = _safe_float(last1h.get("atr"), atr5_val) or atr5_val
 
-    sl, tp1, tp2, tp3 = _build_levels(direction, price, df_5m, df_15m, df_1h, zones, channel_ctx, atr5, atr1h)
+    sl, tp1, tp2, tp3 = _build_levels(direction, price, df_5m, df_15m, df_1h, zones, channel_ctx, atr5_val, atr1h)
 
     wick_bull, wick_bear = _wick_rejection(last5)
     wick_ok = (wick_bull and direction == "BUY") or (wick_bear and direction == "SELL")
@@ -699,6 +826,8 @@ def run_scalp_layer(df_5m, df_15m, df_1h, df_4h, human_layer: Dict[str, Any]) ->
         "score_breakdown": breakdown,
         "signal_type": "SCALP",
         "trend": {"4h": trend_4h, "1h": trend_1h, "15m": trend_15},
+        "atr5": atr5_val,
+        "atr15": atr15_val,
         "reasoning": human_layer.get("explanation", []),
         "adx_conf": adx_conf,
     }
@@ -714,9 +843,21 @@ def run_ultra_layer(df_5m, df_15m, df_1h, df_4h, human_layer: Dict[str, Any]) ->
 
     trend_4h = _trend(last4h)
     trend_1h = _trend(last1h)
+    atr5_val = _safe_float(last5.get("atr"), price * 0.003) or price * 0.003
+    atr15_val = _safe_float(last15.get("atr"), atr5_val) or atr5_val
     direction = _final_direction(trend_4h, trend_1h)
     if direction == "NO_TRADE":
-        return {"action": "NO_TRADE", "reason": "HTF not aligned", "signal_type": "ULTRA"}
+        return {"action": "NO_TRADE", "reason": "HTF not aligned", "signal_type": "ULTRA", "atr5": atr5_val, "atr15": atr15_val}
+
+    low_vol, vol_ctx = _is_low_volatility(atr5_val, atr15_val)
+    if low_vol:
+        return {
+            "action": "NO_TRADE",
+            "reason": "low volatility",
+            "signal_type": "ULTRA",
+            "atr5": vol_ctx["atr5"],
+            "atr15": vol_ctx["atr15"],
+        }
 
     sweep = _liquidity_sweep(df_5m, lookback=20)
     bos = _detect_bos_choch(df_5m, "5m")
@@ -725,9 +866,8 @@ def run_ultra_layer(df_5m, df_15m, df_1h, df_4h, human_layer: Dict[str, Any]) ->
 
     zones = human_layer.get("zones", _detect_zones(df_1h))
     channel_ctx = _detect_channel_context(df_5m, price)
-    atr5 = _safe_float(last5.get("atr"), price * 0.003) or price * 0.003
-    atr1h = _safe_float(last1h.get("atr"), atr5) or atr5
-    sl, tp1, tp2, tp3 = _build_levels(direction, price, df_5m, df_15m, df_1h, zones, channel_ctx, atr5, atr1h)
+    atr1h = _safe_float(last1h.get("atr"), atr5_val) or atr5_val
+    sl, tp1, tp2, tp3 = _build_levels(direction, price, df_5m, df_15m, df_1h, zones, channel_ctx, atr5_val, atr1h)
 
     bos_ok = bos.get("direction") == ("bullish" if direction == "BUY" else "bearish")
     sweep_ok = (sweep.get("type") == "below" and direction == "BUY") or (sweep.get("type") == "above" and direction == "SELL")
@@ -760,6 +900,8 @@ def run_ultra_layer(df_5m, df_15m, df_1h, df_4h, human_layer: Dict[str, Any]) ->
         "score_breakdown": breakdown,
         "signal_type": "ULTRA",
         "trend": {"4h": trend_4h, "1h": trend_1h},
+        "atr5": atr5_val,
+        "atr15": atr15_val,
         "reasoning": human_layer.get("explanation", []),
     }
 
@@ -775,13 +917,31 @@ def run_ultra_v3_layer(df_5m, df_15m, df_1h, df_4h, human_layer: Dict[str, Any])
     trend_4h = _trend(last4h)
     trend_1h = _trend(last1h)
     trend_15 = _trend(last15)
+    atr5_val = _safe_float(last5.get("atr"), price * 0.003) or price * 0.003
+    atr15_val = _safe_float(last15.get("atr"), atr5_val) or atr5_val
     direction = _final_direction(trend_4h, trend_1h)
     if direction == "NO_TRADE":
-        return {"action": "NO_TRADE", "reason": "HTF not aligned", "signal_type": "ULTRA_V3"}
+        return {
+            "action": "NO_TRADE",
+            "reason": "HTF not aligned",
+            "signal_type": "ULTRA_V3",
+            "atr5": atr5_val,
+            "atr15": atr15_val,
+        }
     if trend_15 in ("bullish", "bearish") and (
         (trend_15 == "bullish" and direction == "SELL") or (trend_15 == "bearish" and direction == "BUY")
     ):
         return {"action": "NO_TRADE", "reason": "15m confirm failed", "signal_type": "ULTRA_V3"}
+
+    low_vol, vol_ctx = _is_low_volatility(atr5_val, atr15_val)
+    if low_vol:
+        return {
+            "action": "NO_TRADE",
+            "reason": "low volatility",
+            "signal_type": "ULTRA_V3",
+            "atr5": vol_ctx["atr5"],
+            "atr15": vol_ctx["atr15"],
+        }
 
     sweep = _liquidity_sweep(df_5m, lookback=18)
     bos = _detect_bos_choch(df_5m, "5m")
@@ -791,9 +951,8 @@ def run_ultra_v3_layer(df_5m, df_15m, df_1h, df_4h, human_layer: Dict[str, Any])
 
     zones = human_layer.get("zones", _detect_zones(df_1h))
     channel_ctx = _detect_channel_context(df_5m, price)
-    atr5 = _safe_float(last5.get("atr"), price * 0.003) or price * 0.003
-    atr1h = _safe_float(last1h.get("atr"), atr5) or atr5
-    sl, tp1, tp2, tp3 = _build_levels(direction, price, df_5m, df_15m, df_1h, zones, channel_ctx, atr5, atr1h)
+    atr1h = _safe_float(last1h.get("atr"), atr5_val) or atr5_val
+    sl, tp1, tp2, tp3 = _build_levels(direction, price, df_5m, df_15m, df_1h, zones, channel_ctx, atr5_val, atr1h)
 
     bos_ok = (bos.get("direction") == ("bullish" if direction == "BUY" else "bearish")) or (
         bos15.get("direction") == ("bullish" if direction == "BUY" else "bearish")
@@ -828,6 +987,8 @@ def run_ultra_v3_layer(df_5m, df_15m, df_1h, df_4h, human_layer: Dict[str, Any])
         "score_breakdown": breakdown,
         "signal_type": "ULTRA_V3",
         "trend": {"4h": trend_4h, "1h": trend_1h, "15m": trend_15},
+        "atr5": atr5_val,
+        "atr15": atr15_val,
         "reasoning": human_layer.get("explanation", []),
     }
 
@@ -872,17 +1033,26 @@ def consolidate_signals(
     final["human_summary"] = human_layer.get("explanation", [])
 
     entry = _safe_float(final.get("entry"), None)
+    final["layers"] = {"human": human_layer, "scalp": scalp_layer, "ultra": ultra_layer, "ultra_v3": v3_layer}
     if final["action"] in ("BUY", "SELL") and entry is not None:
+        validation_error = _validate_final_signal(final)
+        if validation_error:
+            return {
+                "action": "NO_TRADE",
+                "reason": validation_error,
+                "signal_type": "UNIFIED",
+                "htf_direction": master_direction,
+                "layers": final["layers"],
+            }
         if _should_block_duplicate(entry, final["action"]):
             return {
                 "action": "NO_TRADE",
-                "reason": "Stability layer blocked duplicate entry",
+                "reason": "duplicate blocked",
                 "signal_type": "UNIFIED",
                 "htf_direction": master_direction,
-                "layers": {"human": human_layer, "scalp": scalp_layer, "ultra": ultra_layer, "ultra_v3": v3_layer},
+                "layers": final["layers"],
             }
         _record_signal(entry, final["action"])
-    final["layers"] = {"human": human_layer, "scalp": scalp_layer, "ultra": ultra_layer, "ultra_v3": v3_layer}
     return final
 
 
