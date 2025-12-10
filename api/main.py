@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
+import numpy as np
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 
@@ -19,6 +20,22 @@ TG_CHAT = os.getenv("TG_CHAT")
 DATA_DIR = Path("data")
 LAST_SIGNAL_FILE = DATA_DIR / "last_signal.json"
 DATA_DIR.mkdir(exist_ok=True)
+
+
+def _to_native(obj):
+    """Recursively convert numpy/pandas scalars to native Python types for JSON safety."""
+    if isinstance(obj, dict):
+        return {k: _to_native(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_to_native(v) for v in obj]
+    if isinstance(obj, pd.Timestamp):
+        return obj.isoformat()
+    if isinstance(obj, (np.generic,)):
+        try:
+            return obj.item()
+        except Exception:
+            return bool(obj)
+    return obj
 
 
 def _load_last_signal() -> dict:
@@ -104,6 +121,7 @@ def run_signal():
                     unified = alt_ultra
 
         unified = validate_direction_consistency(unified)
+        unified = _to_native(unified)
 
         # Duplicate guard: block re-emitting same action within 2 USD of last entry
         last_sig = _load_last_signal()

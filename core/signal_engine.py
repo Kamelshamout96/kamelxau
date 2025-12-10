@@ -634,12 +634,12 @@ def _sanitize_levels(
     atr1h_val = _safe_float(atr1h, None)
     atr5_val = _safe_float(atr5, None)
     ref_sl_atr = atr1h_val if atr1h_val and atr1h_val > 0 else (atr5_val if atr5_val and atr5_val > 0 else fallback)
-    ref_tp_atr = atr5_val if atr5_val and atr5_val > 0 else fallback
 
-    min_sl_band = 12.0
-    max_sl_band = 18.0
+    min_sl_band = 6.0
+    max_sl_band = 12.0
     min_tp1 = 2.5
-    tp_gap = 3.0
+    max_tp1 = 7.0
+    tp_gap = 5.0
 
     soft_sl_min = max(min_sl_band, ref_sl_atr * 0.8 if ref_sl_atr else min_sl_band)
     channel_lower = channel_bounds.get("lower") if channel_bounds else None
@@ -648,77 +648,83 @@ def _sanitize_levels(
     safe_sl: Optional[float]
     if action == "BUY":
         candidate_sl = _safe_float(sl)
-        structural_source = False
         if swing_low is not None:
-            structural_source = True
             candidate_sl = swing_low if candidate_sl is None else min(candidate_sl, swing_low)
         elif channel_lower is not None:
             candidate_sl = channel_lower if candidate_sl is None else min(candidate_sl, channel_lower)
         if candidate_sl is not None:
             sl_dist = entry - candidate_sl
-            if structural_source and sl_dist > max_sl_band:
-                return None, []
-            if not structural_source:
-                sl_dist = min(max(sl_dist, soft_sl_min), max_sl_band)
-                candidate_sl = entry - sl_dist
+            sl_dist = min(max(sl_dist, soft_sl_min), max_sl_band)
+            candidate_sl = entry - sl_dist
         else:
             candidate_sl = entry - min(max(soft_sl_min, min_sl_band), max_sl_band)
-            sl_dist = entry - candidate_sl
         safe_sl = candidate_sl if candidate_sl < entry else entry - soft_sl_min
 
         raw_tps: List[float] = []
         for tp in tps:
             tp_val = _safe_float(tp)
-            if tp_val is None or tp_val <= entry:
-                tp_val = entry + min_tp1
-            raw_tps.append(tp_val)
+            if tp_val is not None and tp_val > entry:
+                raw_tps.append(tp_val)
         while len(raw_tps) < 3:
             raw_tps.append(entry + min_tp1)
 
-        risk = abs(entry - safe_sl) if safe_sl is not None else None
-        min_tp1_dist = max(min_tp1, ref_tp_atr * 0.5 if ref_tp_atr else min_tp1)
-        if risk is not None:
-            min_tp1_dist = max(min_tp1_dist, risk + 0.5)
-        tp1 = max(raw_tps[0], entry + min_tp1_dist)
-        tp2 = max(raw_tps[1], tp1 + max(tp_gap, risk * 0.25 if risk else tp_gap))
-        tp3 = max(raw_tps[2], tp2 + max(tp_gap, risk * 0.25 if risk else tp_gap))
+        structural_tp1 = raw_tps[0] if raw_tps else None
+        tp1 = entry + min_tp1
+        if structural_tp1 and structural_tp1 > entry:
+            if (structural_tp1 - entry) > max_tp1:
+                tp1 = structural_tp1
+            else:
+                tp1 = min(max(structural_tp1, entry + min_tp1), entry + max_tp1)
+        else:
+            tp1 = min(max(tp1, entry + min_tp1), entry + max_tp1)
+
+        tp2 = tp1 + tp_gap
+        tp3_structural = None
+        if len(raw_tps) > 2 and raw_tps[2] > tp2:
+            tp3_structural = raw_tps[2]
+        tp3 = tp2 + tp_gap
+        if tp3_structural and tp3_structural > tp2:
+            tp3 = min(tp3, tp3_structural) if tp3_structural < tp3 else tp3_structural
         safe_tps = [tp1, tp2, tp3]
     else:
         candidate_sl = _safe_float(sl)
-        structural_source = False
         if swing_high is not None:
-            structural_source = True
             candidate_sl = swing_high if candidate_sl is None else max(candidate_sl, swing_high)
         elif channel_upper is not None:
             candidate_sl = channel_upper if candidate_sl is None else max(candidate_sl, channel_upper)
         if candidate_sl is not None:
             sl_dist = candidate_sl - entry
-            if structural_source and sl_dist > max_sl_band:
-                return None, []
-            if not structural_source:
-                sl_dist = min(max(sl_dist, soft_sl_min), max_sl_band)
-                candidate_sl = entry + sl_dist
+            sl_dist = min(max(sl_dist, soft_sl_min), max_sl_band)
+            candidate_sl = entry + sl_dist
         else:
             candidate_sl = entry + min(max(soft_sl_min, min_sl_band), max_sl_band)
-            sl_dist = candidate_sl - entry
         safe_sl = candidate_sl if candidate_sl > entry else entry + soft_sl_min
 
         raw_tps = []
         for tp in tps:
             tp_val = _safe_float(tp)
-            if tp_val is None or tp_val >= entry:
-                tp_val = entry - min_tp1
-            raw_tps.append(tp_val)
+            if tp_val is not None and tp_val < entry:
+                raw_tps.append(tp_val)
         while len(raw_tps) < 3:
             raw_tps.append(entry - min_tp1)
 
-        risk = abs(entry - safe_sl) if safe_sl is not None else None
-        min_tp1_dist = max(min_tp1, ref_tp_atr * 0.5 if ref_tp_atr else min_tp1)
-        if risk is not None:
-            min_tp1_dist = max(min_tp1_dist, risk + 0.5)
-        tp1 = min(raw_tps[0], entry - min_tp1_dist)
-        tp2 = min(raw_tps[1], tp1 - max(tp_gap, risk * 0.25 if risk else tp_gap))
-        tp3 = min(raw_tps[2], tp2 - max(tp_gap, risk * 0.25 if risk else tp_gap))
+        structural_tp1 = raw_tps[0] if raw_tps else None
+        tp1 = entry - min_tp1
+        if structural_tp1 and structural_tp1 < entry:
+            if (entry - structural_tp1) > max_tp1:
+                tp1 = structural_tp1
+            else:
+                tp1 = max(min(structural_tp1, entry - min_tp1), entry - max_tp1)
+        else:
+            tp1 = max(min(tp1, entry - min_tp1), entry - max_tp1)
+
+        tp2 = tp1 - tp_gap
+        tp3_structural = None
+        if len(raw_tps) > 2 and raw_tps[2] < tp2:
+            tp3_structural = raw_tps[2]
+        tp3 = tp2 - tp_gap
+        if tp3_structural and tp3_structural < tp2:
+            tp3 = max(tp3, tp3_structural) if tp3_structural > tp3 else tp3_structural
         safe_tps = [tp1, tp2, tp3]
 
     if safe_sl is None:
