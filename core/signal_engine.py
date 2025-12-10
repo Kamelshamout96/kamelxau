@@ -209,12 +209,13 @@ def _structure_bias(swings):
     return bias
 
 
-def _touch_strength(level, df, tolerance=0.0015):
-    """Count touches of a level within a tolerance band."""
+def _touch_strength(level, df, tolerance=0.0015, lookback: int = 40):
+    """Count touches of a level within a tolerance band using recent window."""
     if level is None or len(df) == 0:
         return 0
-    highs = df["high"].values
-    lows = df["low"].values
+    window = df.tail(max(5, min(len(df), lookback)))
+    highs = window["high"].values
+    lows = window["low"].values
     band_high = level * (1 + tolerance)
     band_low = level * (1 - tolerance)
     touches = ((lows <= band_high) & (highs >= band_low)).sum()
@@ -278,8 +279,8 @@ def _detect_structure(df, lookback: int = 120, window: int = 3) -> Dict[str, Any
     }
 
 
-def _detect_zones(df) -> Dict[str, Any]:
-    """Detect demand/supply zones with touch count and confidence."""
+def _detect_zones(df, touch_window: int = 40) -> Dict[str, Any]:
+    """Detect demand/supply zones with touch count and confidence using recent data."""
     swings = _local_swings(df, lookback=120, window=3)
     demand_zone = None
     supply_zone = None
@@ -288,19 +289,19 @@ def _detect_zones(df) -> Dict[str, Any]:
     if swings.get("lows"):
         base_low = swings["lows"][-1]["price"]
         demand_zone = {"low": base_low * 0.998, "high": base_low * 1.002}
-        touches_d = _touch_strength((demand_zone["low"] + demand_zone["high"]) / 2, df)
+        touches_d = _touch_strength((demand_zone["low"] + demand_zone["high"]) / 2, df.tail(touch_window))
 
     if swings.get("highs"):
         base_high = swings["highs"][-1]["price"]
         supply_zone = {"low": base_high * 0.998, "high": base_high * 1.002}
-        touches_s = _touch_strength((supply_zone["low"] + supply_zone["high"]) / 2, df)
+        touches_s = _touch_strength((supply_zone["low"] + supply_zone["high"]) / 2, df.tail(touch_window))
 
-    conf_d = min(100, 40 + touches_d * 15) if demand_zone else 0
-    conf_s = min(100, 40 + touches_s * 15) if supply_zone else 0
+    conf_d = min(100, 35 + touches_d * 10) if demand_zone else 0
+    conf_s = min(100, 35 + touches_s * 10) if supply_zone else 0
 
     return {
-        "demand": {"zone": demand_zone, "touches": touches_d, "confidence": conf_d},
-        "supply": {"zone": supply_zone, "touches": touches_s, "confidence": conf_s},
+        "demand": {"zone": demand_zone, "touches": touches_d, "confidence": conf_d, "range_bound": touches_d > 20},
+        "supply": {"zone": supply_zone, "touches": touches_s, "confidence": conf_s, "range_bound": touches_s > 20},
     }
 
 
@@ -1026,6 +1027,27 @@ def build_human_layer(df_5m, df_15m, df_1h, df_4h) -> Dict[str, Any]:
     }
 
 
+def _is_zone_exhausted(direction: str, zones: Dict[str, Any], structure: Dict[str, Any]) -> bool:
+    """Determine if demand/supply is exhausted based on limited touches and structure bias."""
+    direction = _sanitize_action(direction)
+    struct_bias = structure.get("1H", {}).get("bias") or structure.get("15m", {}).get("bias")
+    if direction == "BUY":
+        demand = zones.get("demand", {})
+        if demand.get("range_bound"):
+            return False
+        touches = demand.get("touches", 0)
+        if touches > 6 and struct_bias != "bullish":
+            return True
+    elif direction == "SELL":
+        supply = zones.get("supply", {})
+        if supply.get("range_bound"):
+            return False
+        touches = supply.get("touches", 0)
+        if touches > 6 and struct_bias != "bearish":
+            return True
+    return False
+
+
 def _ict_direction(struct4h: Dict[str, Any], struct1h: Dict[str, Any]) -> str:
     """Derive ICT bias from HTF structure only (no indicators)."""
     if struct4h.get("bias") == "bullish" and struct1h.get("bias") == "bullish":
@@ -1215,17 +1237,10 @@ def run_scalp_layer(df_5m, df_15m, df_1h, df_4h, human_layer: Dict[str, Any]) ->
     channel_ctx = _detect_channel_context(df_5m, price)
     zones = human_layer.get("zones", _detect_zones(df_1h))
     atr1h = _safe_float(last1h.get("atr"), atr5_val) or atr5_val
-    if direction == "BUY" and zones.get("demand", {}).get("touches", 0) > 12:
+    if _is_zone_exhausted(direction, zones, human_layer.get("structure", {})):
         return {
             "action": "NO_TRADE",
-            "reason": "weak demand zone",
-            "signal_type": "SCALP",
-            "trend": {"4h": trend_4h, "1h": trend_1h, "15m": trend_15},
-        }
-    if direction == "SELL" and zones.get("supply", {}).get("touches", 0) > 12:
-        return {
-            "action": "NO_TRADE",
-            "reason": "weak supply zone",
+            "reason": "weak zone",
             "signal_type": "SCALP",
             "trend": {"4h": trend_4h, "1h": trend_1h, "15m": trend_15},
         }
@@ -1509,10 +1524,8 @@ def run_ultra_layer(df_5m, df_15m, df_1h, df_4h, human_layer: Dict[str, Any]) ->
     zones = human_layer.get("zones", _detect_zones(df_1h))
     channel_ctx = _detect_channel_context(df_5m, price)
     atr1h = _safe_float(last1h.get("atr"), atr5_val) or atr5_val
-    if direction == "BUY" and zones.get("demand", {}).get("touches", 0) > 12:
-        return {"action": "NO_TRADE", "reason": "weak demand zone", "signal_type": "ULTRA", "atr5": atr5_val, "atr15": atr15_val}
-    if direction == "SELL" and zones.get("supply", {}).get("touches", 0) > 12:
-        return {"action": "NO_TRADE", "reason": "weak supply zone", "signal_type": "ULTRA", "atr5": atr5_val, "atr15": atr15_val}
+    if _is_zone_exhausted(direction, zones, human_layer.get("structure", {})):
+        return {"action": "NO_TRADE", "reason": "weak zone", "signal_type": "ULTRA", "atr5": atr5_val, "atr15": atr15_val}
 
     sl, tp1, tp2, tp3 = _build_levels(direction, price, df_5m, df_15m, df_1h, zones, channel_ctx, atr5_val, atr1h)
     if sl is None or tp1 is None or tp2 is None or tp3 is None:
@@ -1625,10 +1638,8 @@ def run_ultra_v3_layer(df_5m, df_15m, df_1h, df_4h, human_layer: Dict[str, Any])
     zones = human_layer.get("zones", _detect_zones(df_1h))
     channel_ctx = _detect_channel_context(df_5m, price)
     atr1h = _safe_float(last1h.get("atr"), atr5_val) or atr5_val
-    if direction == "BUY" and zones.get("demand", {}).get("touches", 0) > 12:
-        return {"action": "NO_TRADE", "reason": "weak demand zone", "signal_type": "ULTRA_V3"}
-    if direction == "SELL" and zones.get("supply", {}).get("touches", 0) > 12:
-        return {"action": "NO_TRADE", "reason": "weak supply zone", "signal_type": "ULTRA_V3"}
+    if _is_zone_exhausted(direction, zones, human_layer.get("structure", {})):
+        return {"action": "NO_TRADE", "reason": "weak zone", "signal_type": "ULTRA_V3"}
 
     sl, tp1, tp2, tp3 = _build_levels(direction, price, df_5m, df_15m, df_1h, zones, channel_ctx, atr5_val, atr1h)
     if sl is None or tp1 is None or tp2 is None or tp3 is None:
