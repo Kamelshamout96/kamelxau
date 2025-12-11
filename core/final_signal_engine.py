@@ -19,6 +19,7 @@ from .scalper_execution_engine import ScalperExecutionEngine
 from .structure_engine import StructureEngine
 from .ultralight_execution_engine import UltraLightExecutionEngine
 from .momentum_breakout_layer import MomentumBreakoutLayer
+from .momentum_breakout_buy_engine import MomentumBreakoutBuyEngine
 
 
 class FinalSignalEngine:
@@ -34,6 +35,7 @@ class FinalSignalEngine:
         self.discretionary_layer = DiscretionaryLayer()
         self.ultralight_engine = UltraLightExecutionEngine()
         self.mbl = MomentumBreakoutLayer()
+        self.breakout_buy_engine = MomentumBreakoutBuyEngine()
         self.dup_engine = DuplicatePreventionEngine()
         self.last_signal_time = None
         self.fallback_timeout = timedelta(minutes=15)
@@ -70,6 +72,23 @@ class FinalSignalEngine:
         )
         if block:
             return {"action": "NO_TRADE", "reason": "duplicate_block", "analysis": analysis.context, "discretionary_context": {}}
+
+        if signal.get("action") == "NO_TRADE":
+            bo_signal = self.breakout_buy_engine.evaluate(df_5m, ctx, analysis.context.get("discretionary_context", {}))
+            if bo_signal:
+                block_bo = self.dup_engine.should_block(
+                    bo_signal,
+                    {
+                        "time": df_5m.index[-1] if len(df_5m) else None,
+                        "structure_tag": ctx["structure_shifts"]["5m"].get("direction"),
+                        "sweep_tag": ctx["sweeps"]["5m"].get("type"),
+                        "poi_tag": "breakout",
+                        "momentum": analysis.context.get("discretionary_context", {}).get("momentum_bias"),
+                    },
+                    price_delta_override=0.5,
+                )
+                if not block_bo:
+                    signal = bo_signal
 
         force_fallback = False
         last_time = df_5m.index[-1] if len(df_5m) else None
