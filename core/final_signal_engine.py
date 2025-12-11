@@ -10,6 +10,7 @@ from datetime import timedelta
 
 from .bias_engine import BiasEngine
 from .duplicate_prevention_engine import DuplicatePreventionEngine
+from .discretionary_layer import DiscretionaryLayer
 from .liquidity_engine import LiquidityEngine
 from .market_analysis_engine import MarketAnalysisEngine
 from .poi_detector import POIDetector
@@ -28,6 +29,7 @@ class FinalSignalEngine:
 
         self.analysis_engine = MarketAnalysisEngine(bias_engine, poi_detector, structure_engine, liquidity_engine)
         self.scalper_engine = ScalperExecutionEngine(structure_engine, liquidity_engine, reversal_engine)
+        self.discretionary_layer = DiscretionaryLayer()
         self.dup_engine = DuplicatePreventionEngine()
         self.last_signal_time = None
         self.fallback_timeout = timedelta(minutes=15)
@@ -48,6 +50,7 @@ class FinalSignalEngine:
             channel_ctx=ctx["channel"],
             liquidity_pools=ctx["pools"],
         )
+        stage2_action = signal.get("action")
 
         block = self.dup_engine.should_block(
             signal,
@@ -60,7 +63,7 @@ class FinalSignalEngine:
             },
         )
         if block:
-            return {"action": "NO_TRADE", "reason": "duplicate_block", "analysis": analysis.context}
+            return {"action": "NO_TRADE", "reason": "duplicate_block", "analysis": analysis.context, "discretionary_context": {}}
 
         force_fallback = False
         last_time = df_5m.index[-1] if len(df_5m) else None
@@ -162,7 +165,7 @@ class FinalSignalEngine:
                 }
                 block_fb = self.dup_engine.should_block(fb_signal, fb_context, price_delta_override=0.2)
                 if block_fb:
-                    return {"action": "NO_TRADE", "reason": "duplicate_block", "analysis": analysis.context}
+                    return {"action": "NO_TRADE", "reason": "duplicate_block", "analysis": analysis.context, "discretionary_context": {}}
                 signal = fb_signal
                 exec_ctx = {
                     "structure": ctx["structure_shifts"],
@@ -173,6 +176,10 @@ class FinalSignalEngine:
                     "sweep_tag": fb_context["sweep_tag"],
                     "poi_tag": fb_context["poi_tag"],
                 }
+
+        discretionary_ctx = {}
+        if stage2_action == "NO_TRADE" and signal.get("action") == "NO_TRADE" and len(df_5m) >= 50:
+            discretionary_ctx = self.discretionary_layer.analyze(df_5m, analysis.context)
 
         signal["trend"] = {
             "4h": ctx["bias_context"]["htf_structure"]["4h"].get("bias", "neutral"),
@@ -203,6 +210,7 @@ class FinalSignalEngine:
             "channels": 10 if ctx["channel"].get("tap") else 0,
             "htf_context": 20 if bias != "NEUTRAL" else 0,
         }
+        signal["discretionary_context"] = discretionary_ctx
 
         if signal.get("action") in ("BUY", "SELL") and len(df_5m):
             self.last_signal_time = df_5m.index[-1]
