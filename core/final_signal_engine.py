@@ -17,6 +17,7 @@ from .poi_detector import POIDetector
 from .reversal_engine import ReversalEngine
 from .scalper_execution_engine import ScalperExecutionEngine
 from .structure_engine import StructureEngine
+from .ultralight_execution_engine import UltraLightExecutionEngine
 
 
 class FinalSignalEngine:
@@ -30,6 +31,7 @@ class FinalSignalEngine:
         self.analysis_engine = MarketAnalysisEngine(bias_engine, poi_detector, structure_engine, liquidity_engine)
         self.scalper_engine = ScalperExecutionEngine(structure_engine, liquidity_engine, reversal_engine)
         self.discretionary_layer = DiscretionaryLayer()
+        self.ultralight_engine = UltraLightExecutionEngine()
         self.dup_engine = DuplicatePreventionEngine()
         self.last_signal_time = None
         self.fallback_timeout = timedelta(minutes=15)
@@ -207,6 +209,41 @@ class FinalSignalEngine:
                     "sweep_tag": disc_context["sweep_tag"],
                     "poi_tag": disc_context["poi_tag"],
                 }
+
+            if signal.get("action") == "NO_TRADE":
+                ultra_signal = self.ultralight_engine.evaluate(
+                    df_5m=df_5m,
+                    df_15m=df_15m,
+                    ctx=analysis.context,
+                    discretionary_ctx=discretionary_ctx,
+                    bias=bias,
+                )
+                if ultra_signal.get("action") in ("BUY", "SELL"):
+                    ultra_context = {
+                        "time": last_time,
+                        "structure_tag": ctx["structure_shifts"]["5m"].get("direction"),
+                        "sweep_tag": ctx["sweeps"]["5m"].get("type"),
+                        "poi_tag": discretionary_ctx.get("zone_type"),
+                        "momentum": ctx.get("momentum", "unknown"),
+                    }
+                    block_ultra = self.dup_engine.should_block(ultra_signal, ultra_context, price_delta_override=0.3)
+                    if block_ultra:
+                        return {
+                            "action": "NO_TRADE",
+                            "reason": "duplicate_block",
+                            "analysis": analysis.context,
+                            "discretionary_context": discretionary_ctx,
+                        }
+                    signal = ultra_signal
+                    exec_ctx = {
+                        "structure": ctx["structure_shifts"],
+                        "sweeps": ctx["sweeps"],
+                        "wick": {},
+                        "poi_touch": {},
+                        "structure_tag": ultra_context["structure_tag"],
+                        "sweep_tag": ultra_context["sweep_tag"],
+                        "poi_tag": ultra_context["poi_tag"],
+                    }
 
         signal["trend"] = {
             "4h": ctx["bias_context"]["htf_structure"]["4h"].get("bias", "neutral"),
