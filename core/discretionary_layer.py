@@ -188,6 +188,57 @@ def _get_atr(df, ctx: Dict[str, Any]):
     return float(atr)
 
 
+def _no_trade_reason(
+    trend_direction: str,
+    zone_type: str,
+    reaction: str,
+    breakout_status: str,
+    retest_found: bool,
+    retest_quality: str,
+    momentum_supports_bull: bool,
+    momentum_supports_bear: bool,
+    liquidity_event: str,
+) -> str:
+    if trend_direction not in ("bullish", "bearish"):
+        return "no_trend_edge"
+    if zone_type == "none":
+        return "no_zone_reaction"
+
+    if trend_direction == "bullish":
+        if zone_type != "demand":
+            return "demand_zone_missing"
+        if liquidity_event == "high_sweep":
+            return "bullish_liquidity_sweep_risk"
+        if reaction != "rejection":
+            return "demand_not_rejecting"
+        if breakout_status == "bullish_breakout":
+            if not retest_found:
+                return "awaiting_bullish_retest"
+            if retest_quality not in ("normal", "strong"):
+                return "weak_bullish_retest"
+        if not momentum_supports_bull:
+            return "insufficient_bullish_momentum"
+        return "bullish_filters_not_met"
+
+    if trend_direction == "bearish":
+        if zone_type != "supply":
+            return "supply_zone_missing"
+        if liquidity_event == "low_sweep":
+            return "bearish_liquidity_sweep_risk"
+        if reaction != "rejection":
+            return "supply_not_rejecting"
+        if breakout_status == "bearish_breakout":
+            if not retest_found:
+                return "awaiting_bearish_retest"
+            if retest_quality not in ("normal", "strong"):
+                return "weak_bearish_retest"
+        if not momentum_supports_bear:
+            return "insufficient_bearish_momentum"
+        return "bearish_filters_not_met"
+
+    return "analysis_only"
+
+
 class DiscretionaryLayer:
     def analyze(self, df_5m, ctx: Dict[str, Any]) -> Dict[str, Any]:
         if df_5m is None or len(df_5m) < 50:
@@ -293,6 +344,19 @@ class DiscretionaryLayer:
         elif bearish_setup or (trend_direction == "bearish" and zone_type == "supply" and reaction == "rejection" and momentum_supports_bear):
             action = "SELL"
             reason = "discretionary_bearish_breakout" if bearish_setup else "discretionary_bearish_rejection"
+
+        if action == "NO_TRADE":
+            reason = _no_trade_reason(
+                trend_direction=trend_direction,
+                zone_type=zone_type,
+                reaction=reaction,
+                breakout_status=breakout_status,
+                retest_found=retest_found,
+                retest_quality=retest_quality,
+                momentum_supports_bull=momentum_supports_bull,
+                momentum_supports_bear=momentum_supports_bear,
+                liquidity_event=liquidity_event,
+            )
 
         if action in ("BUY", "SELL"):
             atr = _get_atr(df_5m, ctx)
