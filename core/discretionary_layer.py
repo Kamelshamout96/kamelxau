@@ -152,6 +152,42 @@ def _liquidity_event(df, pools: Dict[str, Any]) -> str:
     return event
 
 
+def _atr_14(df):
+    import numpy as np
+    import pandas as pd
+
+    tr = np.maximum.reduce(
+        [
+            df["high"] - df["low"],
+            (df["high"] - df["close"].shift(1)).abs(),
+            (df["low"] - df["close"].shift(1)).abs(),
+        ]
+    )
+    return float(pd.Series(tr, index=df.index).rolling(14).mean().iloc[-1])
+
+
+def _get_atr(df, ctx: Dict[str, Any]):
+    ctx_indicators = ctx.get("indicators", {}) if ctx else {}
+    atr = ctx_indicators.get("atr_5m")
+    if atr:
+        try:
+            return float(atr)
+        except Exception:
+            atr = None
+
+    atr = None
+    for col in ("atr", "atr_14", "ATR", "ATR_14"):
+        if col in df.columns:
+            try:
+                atr = float(df[col].iloc[-1])
+                break
+            except Exception:
+                atr = None
+    if atr is None:
+        atr = _atr_14(df)
+    return float(atr)
+
+
 class DiscretionaryLayer:
     def analyze(self, df_5m, ctx: Dict[str, Any]) -> Dict[str, Any]:
         if df_5m is None or len(df_5m) < 50:
@@ -167,6 +203,7 @@ class DiscretionaryLayer:
                 "liquidity_event": "none",
                 "liquidity_context": "unclear",
                 "conclusion": "Insufficient data for discretionary read; fewer than 50 candles.",
+                "signal": {"action": "NO_TRADE", "reason": "insufficient_data"},
             }
 
         swings = _recent_swings(df_5m)
@@ -221,6 +258,84 @@ class DiscretionaryLayer:
             f"{breakout_note} {retest_note} {zone_note} {liq_note}"
         )
 
+        # Discretionary signal (optional)
+        action = "NO_TRADE"
+        reason = "analysis_only"
+        entry = float(df_5m["close"].iloc[-1])
+        sl = tp = tp1 = tp2 = tp3 = None
+        confidence = 0.0
+
+        bullish_setup = (
+            trend_direction == "bullish"
+            and breakout_status == "bullish_breakout"
+            and retest_found
+            and retest_quality in ("normal", "strong")
+            and zone_type == "demand"
+            and reaction == "rejection"
+            and liquidity_event != "high_sweep"
+        )
+        bearish_setup = (
+            trend_direction == "bearish"
+            and breakout_status == "bearish_breakout"
+            and retest_found
+            and retest_quality in ("normal", "strong")
+            and zone_type == "supply"
+            and reaction == "rejection"
+            and liquidity_event != "low_sweep"
+        )
+
+        momentum_supports_bull = momentum_bias.startswith("strong_bull") or momentum_bias.startswith("building_bull")
+        momentum_supports_bear = momentum_bias.startswith("strong_bear") or momentum_bias.startswith("building_bear")
+
+        if bullish_setup or (trend_direction == "bullish" and zone_type == "demand" and reaction == "rejection" and momentum_supports_bull):
+            action = "BUY"
+            reason = "discretionary_bullish_breakout" if bullish_setup else "discretionary_bullish_rejection"
+        elif bearish_setup or (trend_direction == "bearish" and zone_type == "supply" and reaction == "rejection" and momentum_supports_bear):
+            action = "SELL"
+            reason = "discretionary_bearish_breakout" if bearish_setup else "discretionary_bearish_rejection"
+
+        if action in ("BUY", "SELL"):
+            atr = _get_atr(df_5m, ctx)
+            if action == "BUY":
+                sl_raw = entry - (atr * 2.5)
+                sl_hard = entry - 10
+                sl = min(sl_raw, sl_hard)
+                tp1 = entry + (atr * 1.0)
+                tp2 = entry + (atr * 1.6)
+                tp3 = entry + (atr * 2.2)
+                tp = tp1
+            else:
+                sl_raw = entry + (atr * 2.5)
+                sl_hard = entry + 10
+                sl = max(sl_raw, sl_hard)
+                tp1 = entry - (atr * 1.0)
+                tp2 = entry - (atr * 1.6)
+                tp3 = entry - (atr * 2.2)
+                tp = tp1
+
+            confidence = 55.0
+            if retest_quality == "strong":
+                confidence += 7.5
+            elif retest_quality == "normal":
+                confidence += 3.0
+            if "strong" in momentum_bias:
+                confidence += 5.0
+            if reaction == "rejection" and zone_strength == "strong":
+                confidence += 5.0
+            confidence = min(75.0, confidence)
+
+        disc_signal = {
+            "action": action,
+            "entry": round(entry, 2),
+            "sl": round(sl, 2) if sl else None,
+            "tp": round(tp, 2) if tp else None,
+            "tp1": round(tp1, 2) if tp1 else None,
+            "tp2": round(tp2, 2) if tp2 else None,
+            "tp3": round(tp3, 2) if tp3 else None,
+            "confidence": confidence,
+            "reason": reason,
+        }
+
         return {
             "trend_direction": trend_direction,
             "momentum_bias": momentum_bias,
@@ -233,4 +348,5 @@ class DiscretionaryLayer:
             "liquidity_event": liquidity_event,
             "liquidity_context": liquidity_context,
             "conclusion": conclusion,
+            "signal": disc_signal,
         }

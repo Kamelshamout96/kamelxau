@@ -180,6 +180,33 @@ class FinalSignalEngine:
         discretionary_ctx = {}
         if stage2_action == "NO_TRADE" and signal.get("action") == "NO_TRADE" and len(df_5m) >= 50:
             discretionary_ctx = self.discretionary_layer.analyze(df_5m, analysis.context)
+            disc_signal = discretionary_ctx.get("signal") or {}
+            if disc_signal.get("action") in ("BUY", "SELL"):
+                disc_context = {
+                    "time": last_time,
+                    "structure_tag": ctx["structure_shifts"]["5m"].get("direction"),
+                    "sweep_tag": ctx["sweeps"]["5m"].get("type"),
+                    "poi_tag": discretionary_ctx.get("zone_type"),
+                    "momentum": ctx.get("momentum", "unknown"),
+                }
+                block_disc = self.dup_engine.should_block(disc_signal, disc_context)
+                if block_disc:
+                    return {
+                        "action": "NO_TRADE",
+                        "reason": "duplicate_block",
+                        "analysis": analysis.context,
+                        "discretionary_context": discretionary_ctx,
+                    }
+                signal = disc_signal
+                exec_ctx = {
+                    "structure": ctx["structure_shifts"],
+                    "sweeps": ctx["sweeps"],
+                    "wick": {},
+                    "poi_touch": {},
+                    "structure_tag": disc_context["structure_tag"],
+                    "sweep_tag": disc_context["sweep_tag"],
+                    "poi_tag": disc_context["poi_tag"],
+                }
 
         signal["trend"] = {
             "4h": ctx["bias_context"]["htf_structure"]["4h"].get("bias", "neutral"),
