@@ -18,6 +18,7 @@ from .reversal_engine import ReversalEngine
 from .scalper_execution_engine import ScalperExecutionEngine
 from .structure_engine import StructureEngine
 from .ultralight_execution_engine import UltraLightExecutionEngine
+from .momentum_breakout_layer import MomentumBreakoutLayer
 
 
 class FinalSignalEngine:
@@ -32,6 +33,7 @@ class FinalSignalEngine:
         self.scalper_engine = ScalperExecutionEngine(structure_engine, liquidity_engine, reversal_engine)
         self.discretionary_layer = DiscretionaryLayer()
         self.ultralight_engine = UltraLightExecutionEngine()
+        self.mbl = MomentumBreakoutLayer()
         self.dup_engine = DuplicatePreventionEngine()
         self.last_signal_time = None
         self.fallback_timeout = timedelta(minutes=15)
@@ -224,6 +226,42 @@ class FinalSignalEngine:
                 }
 
             if signal.get("action") == "NO_TRADE":
+                mbl_signal = self.mbl.evaluate(
+                    df_5m=df_5m,
+                    ctx=analysis.context,
+                    discretionary_ctx=discretionary_ctx,
+                    bias=bias,
+                    breakout_filter_active=breakout_filter_active,
+                )
+                if mbl_signal.get("action") in ("BUY", "SELL"):
+                    mbl_context = {
+                        "time": last_time,
+                        "structure_tag": ctx["structure_shifts"]["5m"].get("direction"),
+                        "sweep_tag": ctx["sweeps"]["5m"].get("type"),
+                        "poi_tag": discretionary_ctx.get("zone_type"),
+                        "momentum": ctx.get("momentum", "unknown"),
+                    }
+                    block_mbl = self.dup_engine.should_block(mbl_signal, mbl_context, price_delta_override=0.4)
+                    if block_mbl:
+                        return {
+                            "action": "NO_TRADE",
+                            "reason": "duplicate_block",
+                            "analysis": analysis.context,
+                            "discretionary_context": discretionary_ctx,
+                        }
+                    signal = mbl_signal
+                    exec_ctx = {
+                        "structure": ctx["structure_shifts"],
+                        "sweeps": ctx["sweeps"],
+                        "wick": {},
+                        "poi_touch": {},
+                        "structure_tag": mbl_context["structure_tag"],
+                        "sweep_tag": mbl_context["sweep_tag"],
+                        "poi_tag": mbl_context["poi_tag"],
+                        "breakout_hh": breakout_filter_active,
+                    }
+
+            if signal.get("action") == "NO_TRADE":
                 ultra_signal = self.ultralight_engine.evaluate(
                     df_5m=df_5m,
                     df_15m=df_15m,
@@ -287,6 +325,8 @@ class FinalSignalEngine:
         ]
         if breakout_filter_active:
             reasoning.append("Breakout filter active: Higher-High detected, SELL blocked")
+        if signal.get("reason") == "momentum_breakout":
+            reasoning.append("Momentum Breakout Layer active: high-momentum continuation entry")
         signal["reasoning"] = reasoning
         signal["score_breakdown"] = {
             "structure": 20 if exec_ctx.get("structure_tag") else 0,
