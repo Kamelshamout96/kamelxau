@@ -42,6 +42,7 @@ class FinalSignalEngine:
         bias = analysis.bias
         ctx = analysis.context
         ctx["momentum"] = ctx.get("momentum", "unknown")
+        breakout_filter_active = ctx.get("breakout_hh", False)
 
         signal, exec_ctx = self.scalper_engine.evaluate(
             bias=bias,
@@ -51,6 +52,7 @@ class FinalSignalEngine:
             imbalances=ctx["imbalances"],
             channel_ctx=ctx["channel"],
             liquidity_pools=ctx["pools"],
+            breakout_hh=ctx.get("breakout_hh", False),
         )
         stage2_action = signal.get("action")
 
@@ -136,7 +138,14 @@ class FinalSignalEngine:
                 tp1 = price + (atr * 1.0)
                 tp2 = price + (atr * 1.6)
                 tp3 = price + (atr * 2.2)
-            elif _in_zone(supply_zone) and bearish_candle and not bull_sweep and momentum_ok and bias in ("SELL ONLY", "NEUTRAL"):
+            elif (
+                _in_zone(supply_zone)
+                and bearish_candle
+                and not bull_sweep
+                and momentum_ok
+                and bias in ("SELL ONLY", "NEUTRAL")
+                and not breakout_filter_active
+            ):
                 action_fb = "SELL"
                 sl_raw = price + (atr * 2.5)
                 sl_hard = price + 10
@@ -177,12 +186,15 @@ class FinalSignalEngine:
                     "structure_tag": fb_context["structure_tag"],
                     "sweep_tag": fb_context["sweep_tag"],
                     "poi_tag": fb_context["poi_tag"],
+                    "breakout_hh": breakout_filter_active,
                 }
 
         discretionary_ctx = {}
         if stage2_action == "NO_TRADE" and signal.get("action") == "NO_TRADE" and len(df_5m) >= 50:
             discretionary_ctx = self.discretionary_layer.analyze(df_5m, analysis.context)
             disc_signal = discretionary_ctx.get("signal") or {}
+            if breakout_filter_active and disc_signal.get("action") == "SELL":
+                disc_signal = {}
             if disc_signal.get("action") in ("BUY", "SELL"):
                 disc_context = {
                     "time": last_time,
@@ -208,6 +220,7 @@ class FinalSignalEngine:
                     "structure_tag": disc_context["structure_tag"],
                     "sweep_tag": disc_context["sweep_tag"],
                     "poi_tag": disc_context["poi_tag"],
+                    "breakout_hh": breakout_filter_active,
                 }
 
             if signal.get("action") == "NO_TRADE":
@@ -218,6 +231,8 @@ class FinalSignalEngine:
                     discretionary_ctx=discretionary_ctx,
                     bias=bias,
                 )
+                if breakout_filter_active and ultra_signal.get("action") == "SELL":
+                    ultra_signal = {}
                 if ultra_signal.get("action") in ("BUY", "SELL"):
                     ultra_context = {
                         "time": last_time,
@@ -243,7 +258,11 @@ class FinalSignalEngine:
                         "structure_tag": ultra_context["structure_tag"],
                         "sweep_tag": ultra_context["sweep_tag"],
                         "poi_tag": ultra_context["poi_tag"],
+                        "breakout_hh": breakout_filter_active,
                     }
+
+        if breakout_filter_active and signal.get("action") == "NO_TRADE" and not signal.get("reason"):
+            signal["reason"] = "blocked_breakout_up"
 
         signal["trend"] = {
             "4h": ctx["bias_context"]["htf_structure"]["4h"].get("bias", "neutral"),
@@ -260,12 +279,15 @@ class FinalSignalEngine:
         signal["zones"] = ctx["zones"]
         signal["momentum"] = "light"
         signal["channels"] = ctx["channel"]
-        signal["reasoning"] = [
+        reasoning = [
             f"Bias: {bias}",
             f"Structure 15m/5m: {ctx['structure_shifts']}",
             f"Sweeps: {sweeps}",
             f"POIs touched: {exec_ctx.get('poi_tag')}",
         ]
+        if breakout_filter_active:
+            reasoning.append("Breakout filter active: Higher-High detected, SELL blocked")
+        signal["reasoning"] = reasoning
         signal["score_breakdown"] = {
             "structure": 20 if exec_ctx.get("structure_tag") else 0,
             "liquidity": 20 if exec_ctx.get("sweep_tag") else 0,

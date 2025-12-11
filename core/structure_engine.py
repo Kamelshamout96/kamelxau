@@ -37,3 +37,9 @@ class StructureEngine:
             return "unknown"
         mid = (upper + lower) / 2
         return "premium" if price >= mid else "discount"
+
+    def higher_high_breakout(self, df_5m, price: float) -> Dict[str, Any]:
+        """
+        Detect a higher-high breakout using the latest swing high on 5m data.
+        """
+        return se._detect_hh_breakout(df_5m, price, buffer=0.5)

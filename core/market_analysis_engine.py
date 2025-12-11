@@ -34,15 +34,17 @@ class MarketAnalysisEngine:
 
     def analyze(self, df_5m, df_15m, df_1h, df_4h) -> MarketAnalysisResult:
         bias, bias_ctx = self.bias_engine.compute_bias(df_4h, df_1h)
+        last_price = float(df_5m.iloc[-1]["close"]) if len(df_5m) else 0.0
         zones = self.poi_detector.detect_zones(df_1h)
         imbalances = self.poi_detector.detect_imbalance(df_15m)
         order_blocks = self.poi_detector.detect_order_blocks(df_1h)
         liquidity_levels = self.poi_detector.detect_liquidity_levels(df_15m, df_5m)
         sweeps = self.liquidity_engine.detect_sweeps(df_15m, df_5m)
         shifts = self.structure_engine.detect_structure_shifts(df_15m, df_5m)
-        channel = self.structure_engine.channel_context(df_1h, float(df_5m.iloc[-1]["close"]))
-        prem_disc = self.structure_engine.premium_discount(float(df_5m.iloc[-1]["close"]), channel.get("bounds", {}))
+        channel = self.structure_engine.channel_context(df_1h, last_price)
+        prem_disc = self.structure_engine.premium_discount(last_price, channel.get("bounds", {}))
         pools = self.liquidity_engine.liquidity_pools(df_15m, df_5m)
+        breakout_ctx = self.structure_engine.higher_high_breakout(df_5m, last_price) if len(df_5m) else {"breakout_hh": False, "last_swing_high": None, "threshold": None}
 
         ctx: Dict[str, Any] = {
             "zones": zones,
@@ -55,5 +57,7 @@ class MarketAnalysisEngine:
             "premium_discount": prem_disc,
             "pools": pools,
             "bias_context": bias_ctx,
+            "breakout_hh": breakout_ctx.get("breakout_hh", False),
+            "breakout_ctx": breakout_ctx,
         }
         return MarketAnalysisResult(bias=bias, context=ctx)

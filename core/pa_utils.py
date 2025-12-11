@@ -164,3 +164,20 @@ def _wick_rejection(candle):
     bullish_reject = lower_wick > body * 2 and close > open_
     bearish_reject = upper_wick > body * 2 and close < open_
     return bullish_reject, bearish_reject
+
+
+def _detect_hh_breakout(df, price: float, buffer: float = 0.5) -> Dict[str, Any]:
+    """
+    Detects a higher-high breakout relative to the latest swing high.
+    Returns breakout flag plus context for last swing high and threshold.
+    """
+    if len(df) == 0:
+        return {"breakout_hh": False, "last_swing_high": None, "threshold": None}
+
+    swings = _local_swings(df, lookback=120, window=3)
+    highs = swings.get("highs", [])
+    last_swing_high = highs[-1]["price"] if highs else None
+    threshold = last_swing_high + buffer if last_swing_high is not None else None
+    breakout = bool(threshold is not None and price > threshold)
+
+    return {"breakout_hh": breakout, "last_swing_high": last_swing_high, "threshold": threshold}

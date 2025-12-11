@@ -40,9 +40,35 @@ class ScalperExecutionEngine:
         imbalances: Dict[str, Any],
         channel_ctx: Dict[str, Any],
         liquidity_pools: Dict[str, Any],
+        breakout_hh: bool = False,
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         last5 = df_5m.iloc[-1]
         price = float(last5["close"])
+        if breakout_hh:
+            entry = round(price, 2)
+            signal = {
+                "action": "NO_TRADE",
+                "reason": "blocked_breakout_up",
+                "entry": entry,
+                "sl": None,
+                "tp": None,
+                "tp1": None,
+                "tp2": None,
+                "tp3": None,
+                "confidence": 0.0,
+            }
+            ctx = {
+                "structure": {},
+                "sweeps": {},
+                "wick": {},
+                "poi_touch": {},
+                "structure_tag": None,
+                "sweep_tag": None,
+                "poi_tag": None,
+                "breakout_hh": True,
+            }
+            return signal, ctx
+
         sweeps = self.liq_engine.detect_sweeps(df_15m, df_5m)
         structure = self.struct_engine.detect_structure_shifts(df_15m, df_5m)
         wick = self.rev_engine.wick_rejection(last5)
@@ -142,6 +168,7 @@ class ScalperExecutionEngine:
             "structure_tag": structure_tag,
             "sweep_tag": sweep_tag,
             "poi_tag": poi_tag,
+            "breakout_hh": breakout_hh,
         }
 
         return signal, ctx
