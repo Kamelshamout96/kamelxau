@@ -21,6 +21,7 @@ from .ultralight_execution_engine import UltraLightExecutionEngine
 from .momentum_breakout_layer import MomentumBreakoutLayer
 from .momentum_breakout_buy_engine import MomentumBreakoutBuyEngine
 from .price_action_analyst_layer import PriceActionAnalystLayer
+from .light_price_action_layer import LightPriceActionLayer
 
 
 class FinalSignalEngine:
@@ -38,6 +39,7 @@ class FinalSignalEngine:
         self.mbl = MomentumBreakoutLayer()
         self.breakout_buy_engine = MomentumBreakoutBuyEngine()
         self.price_action_layer = PriceActionAnalystLayer()
+        self.light_pa_layer = LightPriceActionLayer()
         self.dup_engine = DuplicatePreventionEngine()
         self.last_signal_time = None
         self.fallback_timeout = timedelta(minutes=15)
@@ -284,6 +286,36 @@ class FinalSignalEngine:
                                 "poi_tag": pa_context["poi_tag"],
                                 "breakout_hh": breakout_filter_active,
                             }
+
+            if signal.get("action") == "NO_TRADE":
+                light_pa_signal = self.light_pa_layer.evaluate(
+                    df_5m=df_5m,
+                    ctx=analysis.context,
+                    discretionary_ctx=discretionary_ctx,
+                    bias=bias,
+                    breakout_filter_active=breakout_filter_active,
+                )
+                if light_pa_signal.get("action") in ("BUY", "SELL"):
+                    light_context = {
+                        "time": last_time,
+                        "structure_tag": ctx["structure_shifts"]["5m"].get("direction"),
+                        "sweep_tag": ctx["sweeps"]["5m"].get("type"),
+                        "poi_tag": "light_price_action",
+                        "momentum": ctx.get("momentum", "unknown"),
+                    }
+                    block_light = self.dup_engine.should_block(light_pa_signal, light_context, price_delta_override=0.3)
+                    if not block_light:
+                        signal = light_pa_signal
+                        exec_ctx = {
+                            "structure": ctx["structure_shifts"],
+                            "sweeps": ctx["sweeps"],
+                            "wick": {},
+                            "poi_touch": {},
+                            "structure_tag": light_context["structure_tag"],
+                            "sweep_tag": light_context["sweep_tag"],
+                            "poi_tag": light_context["poi_tag"],
+                            "breakout_hh": breakout_filter_active,
+                        }
 
             if signal.get("action") == "NO_TRADE":
                 mbl_signal = self.mbl.evaluate(
