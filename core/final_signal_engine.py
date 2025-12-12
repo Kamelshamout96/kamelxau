@@ -21,6 +21,7 @@ from .ultralight_execution_engine import UltraLightExecutionEngine
 from .momentum_breakout_layer import MomentumBreakoutLayer
 from .momentum_breakout_buy_engine import MomentumBreakoutBuyEngine
 from .price_action_analyst_layer import PriceActionAnalystLayer
+from .human_scalper_layer import HumanScalperLayer
 
 
 class FinalSignalEngine:
@@ -38,6 +39,7 @@ class FinalSignalEngine:
         self.mbl = MomentumBreakoutLayer()
         self.breakout_buy_engine = MomentumBreakoutBuyEngine()
         self.price_action_layer = PriceActionAnalystLayer()
+        self.human_scalper = HumanScalperLayer()
         self.dup_engine = DuplicatePreventionEngine()
         self.last_signal_time = None
         self.fallback_timeout = timedelta(minutes=15)
@@ -320,6 +322,39 @@ class FinalSignalEngine:
                         "poi_tag": mbl_context["poi_tag"],
                         "breakout_hh": breakout_filter_active,
                     }
+
+            if signal.get("action") == "NO_TRADE":
+                # Human Scalper Layer - mimics professional scalping with safety guarantees
+                human_signal = self.human_scalper.evaluate(
+                    df_5m=df_5m,
+                    df_15m=df_15m,
+                    ctx=analysis.context,
+                    bias=bias,
+                )
+                if breakout_filter_active and human_signal.get("action") == "SELL":
+                    human_signal = {}
+                if human_signal.get("action") in ("BUY", "SELL"):
+                    human_context = {
+                        "time": last_time,
+                        "structure_tag": ctx["structure_shifts"]["5m"].get("direction"),
+                        "sweep_tag": ctx["sweeps"]["5m"].get("type"),
+                        "poi_tag": "human_scalper",
+                        "momentum": ctx.get("momentum", "unknown"),
+                    }
+                    # Relaxed duplicate prevention for human scalper (2.0 pips instead of 0.5)
+                    block_human = self.dup_engine.should_block(human_signal, human_context, price_delta_override=2.0)
+                    if not block_human:
+                        signal = human_signal
+                        exec_ctx = {
+                            "structure": ctx["structure_shifts"],
+                            "sweeps": ctx["sweeps"],
+                            "wick": {},
+                            "poi_touch": {},
+                            "structure_tag": human_context["structure_tag"],
+                            "sweep_tag": human_context["sweep_tag"],
+                            "poi_tag": human_context["poi_tag"],
+                            "breakout_hh": breakout_filter_active,
+                        }
 
             if signal.get("action") == "NO_TRADE":
                 ultra_signal = self.ultralight_engine.evaluate(
