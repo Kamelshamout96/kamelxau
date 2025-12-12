@@ -223,10 +223,13 @@ class HumanScalperLayer:
             action = "BUY"
             confidence = min(50 + (buy_score * 5), 85)  # Scale 50-85
             
-            # Stop loss: below recent swing low or EMA200
-            sl_swing = float(df_5m.iloc[-5:]["low"].min())  # Recent 5-candle low
-            sl_ema = ema200 - (atr * 0.5)
-            sl = max(sl_swing, sl_ema)  # Use the tighter (higher) stop
+            # Stop loss: below recent swing low (10 candles) with ATR padding
+            sl_swing = float(df_5m.iloc[-10:]["low"].min()) - (atr * 0.3)
+            # Ensure SL is not too close (minimum 1.5 ATR from entry)
+            sl_min_dist = price - (atr * 1.5)
+            
+            # Use the lower (further) of the two to guarantee room
+            sl = min(sl_swing, sl_min_dist)
             
             # Take profits: ATR-based scaling
             tp1 = price + (atr * 1.2)
@@ -239,10 +242,13 @@ class HumanScalperLayer:
             action = "SELL"
             confidence = min(50 + (sell_score * 5), 85)  # Scale 50-85
             
-            # Stop loss: above recent swing high or EMA200
-            sl_swing = float(df_5m.iloc[-5:]["high"].max())  # Recent 5-candle high
-            sl_ema = ema200 + (atr * 0.5)
-            sl = min(sl_swing, sl_ema)  # Use the tighter (lower) stop
+            # Stop loss: above recent swing high (10 candles) with ATR padding
+            sl_swing = float(df_5m.iloc[-10:]["high"].max()) + (atr * 0.3)
+            # Ensure SL is not too close (minimum 1.5 ATR from entry)
+            sl_min_dist = price + (atr * 1.5)
+            
+            # Use the higher (further) of the two to guarantee room
+            sl = max(sl_swing, sl_min_dist)
             
             # Take profits: ATR-based scaling
             tp1 = price - (atr * 1.2)
