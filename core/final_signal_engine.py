@@ -20,6 +20,7 @@ from .structure_engine import StructureEngine
 from .ultralight_execution_engine import UltraLightExecutionEngine
 from .momentum_breakout_layer import MomentumBreakoutLayer
 from .momentum_breakout_buy_engine import MomentumBreakoutBuyEngine
+from .price_action_analyst_layer import PriceActionAnalystLayer
 
 
 class FinalSignalEngine:
@@ -36,6 +37,7 @@ class FinalSignalEngine:
         self.ultralight_engine = UltraLightExecutionEngine()
         self.mbl = MomentumBreakoutLayer()
         self.breakout_buy_engine = MomentumBreakoutBuyEngine()
+        self.price_action_layer = PriceActionAnalystLayer()
         self.dup_engine = DuplicatePreventionEngine()
         self.last_signal_time = None
         self.fallback_timeout = timedelta(minutes=15)
@@ -243,6 +245,45 @@ class FinalSignalEngine:
                     "poi_tag": disc_context["poi_tag"],
                     "breakout_hh": breakout_filter_active,
                 }
+
+            if signal.get("action") == "NO_TRADE":
+                pa_signal = self.price_action_layer.evaluate(
+                    df_5m=df_5m,
+                    ctx=analysis.context,
+                    discretionary_ctx=discretionary_ctx,
+                    bias=bias,
+                    breakout_filter_active=breakout_filter_active,
+                )
+                if pa_signal.get("action") in ("BUY", "SELL"):
+                    reject_strong = False
+                    reaction = discretionary_ctx.get("reaction")
+                    zone_type = discretionary_ctx.get("zone_type")
+                    zone_strength = discretionary_ctx.get("zone_strength", "weak")
+                    if pa_signal["action"] == "BUY" and reaction == "rejection" and zone_type == "supply" and zone_strength == "strong":
+                        reject_strong = True
+                    if pa_signal["action"] == "SELL" and reaction == "rejection" and zone_type == "demand" and zone_strength == "strong":
+                        reject_strong = True
+                    if not reject_strong:
+                        pa_context = {
+                            "time": last_time,
+                            "structure_tag": ctx["structure_shifts"]["5m"].get("direction"),
+                            "sweep_tag": ctx["sweeps"]["5m"].get("type"),
+                            "poi_tag": "price_action",
+                            "momentum": ctx.get("momentum", "unknown"),
+                        }
+                        block_pa = self.dup_engine.should_block(pa_signal, pa_context, price_delta_override=0.4)
+                        if not block_pa:
+                            signal = pa_signal
+                            exec_ctx = {
+                                "structure": ctx["structure_shifts"],
+                                "sweeps": ctx["sweeps"],
+                                "wick": {},
+                                "poi_touch": {},
+                                "structure_tag": pa_context["structure_tag"],
+                                "sweep_tag": pa_context["sweep_tag"],
+                                "poi_tag": pa_context["poi_tag"],
+                                "breakout_hh": breakout_filter_active,
+                            }
 
             if signal.get("action") == "NO_TRADE":
                 mbl_signal = self.mbl.evaluate(
