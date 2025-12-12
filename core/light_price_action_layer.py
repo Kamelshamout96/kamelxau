@@ -66,8 +66,7 @@ class LightPriceActionLayer:
         sl = tp1 = tp2 = tp3 = None
 
         # Light BUY: bullish structure or higher close than last swing high, healthy body, no bearish sweep, bias not opposite
-        bearish_gate = (bias != "BUY ONLY" and ( structure_dir == "bearish" or (last_swing_low and close < last_swing_low) or  momentum_bias in ("building_bearish", "strong_bearish")))
-
+        bullish_gate = bias != "SELL ONLY" and (structure_dir == "bullish" or (last_swing_high and close > last_swing_high) or momentum_bias in ("building_bullish", "strong_bullish"))
         momentum_gate_bull = momentum_bias in ("building_bullish", "strong_bullish", "neutral")
         no_bear_absorb = upper_wick <= body * 1.6
         bull_pullback_ok = (high - close) <= rng * 0.45
@@ -79,7 +78,7 @@ class LightPriceActionLayer:
             and momentum_gate_bull
             and no_bear_absorb
             and bull_pullback_ok
-            (and not (bull_sweep and momentum_bias != "strong_bearish"))
+            and not bear_sweep
         ):
             action = "BUY"
             sl = entry - (atr * 1.8)
