@@ -221,7 +221,7 @@ class HumanScalperLayer:
         
         if buy_score >= MIN_CONFLUENCE and not buy_blocked:
             action = "BUY"
-            confidence = min(50 + (buy_score * 5), 85)  # Scale 50-85
+            confidence = min(30 + (buy_score * 5), 85)  # Scale 30-85
             
             # Stop loss: below recent swing low (10 candles) with ATR padding
             sl_swing = float(df_5m.iloc[-10:]["low"].min()) - (atr * 0.3)
@@ -240,7 +240,7 @@ class HumanScalperLayer:
         
         elif sell_score >= MIN_CONFLUENCE and not sell_blocked:
             action = "SELL"
-            confidence = min(50 + (sell_score * 5), 85)  # Scale 50-85
+            confidence = min(30 + (sell_score * 5), 85)  # Scale 30-85
             
             # Stop loss: above recent swing high (10 candles) with ATR padding
             sl_swing = float(df_5m.iloc[-10:]["high"].max()) + (atr * 0.3)
