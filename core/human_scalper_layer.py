@@ -222,39 +222,25 @@ class HumanScalperLayer:
         if buy_score >= MIN_CONFLUENCE and not buy_blocked:
             action = "BUY"
             confidence = min(30 + (buy_score * 5), 85)  # Scale 30-85
-            
-            # Stop loss: below recent swing low (10 candles) with ATR padding
+
             sl_swing = float(df_5m.iloc[-10:]["low"].min()) - (atr * 0.3)
-            # Ensure SL is not too close (minimum 1.5 ATR from entry)
-            sl_min_dist = price - (atr * 1.5)
-            
-            # Use the lower (further) of the two to guarantee room
-            sl = min(sl_swing, sl_min_dist)
-            
-            # Take profits: ATR-based scaling
-            tp1 = price + (atr * 1.2)
-            tp2 = price + (atr * 2.0)
-            tp3 = price + (atr * 3.0)
-            
+            shaped = self._shape_targets("BUY", price, atr, sl_swing, ctx)
+            if shaped is None:
+                return self._no_trade("invalid_tp_sl_buy")
+            sl, tp1, tp2, tp3 = shaped
+
             reason_text = f"Human scalper BUY ({buy_score} confluences): " + ", ".join(buy_reasons)
         
         elif sell_score >= MIN_CONFLUENCE and not sell_blocked:
             action = "SELL"
             confidence = min(30 + (sell_score * 5), 85)  # Scale 30-85
-            
-            # Stop loss: above recent swing high (10 candles) with ATR padding
+
             sl_swing = float(df_5m.iloc[-10:]["high"].max()) + (atr * 0.3)
-            # Ensure SL is not too close (minimum 1.5 ATR from entry)
-            sl_min_dist = price + (atr * 1.5)
-            
-            # Use the higher (further) of the two to guarantee room
-            sl = max(sl_swing, sl_min_dist)
-            
-            # Take profits: ATR-based scaling
-            tp1 = price - (atr * 1.2)
-            tp2 = price - (atr * 2.0)
-            tp3 = price - (atr * 3.0)
-            
+            shaped = self._shape_targets("SELL", price, atr, sl_swing, ctx)
+            if shaped is None:
+                return self._no_trade("invalid_tp_sl_sell")
+            sl, tp1, tp2, tp3 = shaped
+
             reason_text = f"Human scalper SELL ({sell_score} confluences): " + ", ".join(sell_reasons)
         
         else:
@@ -284,6 +270,68 @@ class HumanScalperLayer:
                 "sell": sell_score,
             },
         }
+
+    def _shape_targets(self, action: str, entry: float, atr: float, sl_swing: float, ctx: Dict[str, Any]):
+        """Normalize TP/SL for XAUUSD scalping with guards and structure protection."""
+        min_tp, max_tp = 1.0, 20.0
+        min_sl, max_sl = 2.0, 15.0
+        sl_mult, tp1_mult, tp2_mult, tp3_mult = (2.0, 0.8, 1.4, 2.2)
+
+        sign = 1 if action == "BUY" else -1
+
+        sl_dist = max(min_sl, min(max_sl, sl_mult * atr))
+        sl_price = entry - sign * sl_dist
+
+        # Structure/zone protection
+        if action == "BUY":
+            sl_price = min(sl_price, sl_swing)
+        else:
+            sl_price = max(sl_price, sl_swing)
+
+        zones = ctx.get("zones", {})
+        demand_zone = zones.get("demand", {}).get("zone", {}) if zones else {}
+        supply_zone = zones.get("supply", {}).get("zone", {}) if zones else {}
+        buffer = 0.2 * atr
+        if action == "BUY" and demand_zone.get("low") is not None:
+            try:
+                sl_price = min(sl_price, float(demand_zone.get("low")) - buffer)
+            except Exception:
+                pass
+        if action == "SELL" and supply_zone.get("high") is not None:
+            try:
+                sl_price = max(sl_price, float(supply_zone.get("high")) + buffer)
+            except Exception:
+                pass
+
+        tp1_dist = max(min_tp, min(max_tp, tp1_mult * atr))
+        tp2_dist = max(tp1_dist + 0.1, max(min_tp, min(max_tp, tp2_mult * atr)))
+        tp3_dist = max(tp2_dist + 0.1, max(min_tp, min(max_tp, tp3_mult * atr)))
+
+        tp1 = entry + sign * tp1_dist
+        tp2 = entry + sign * tp2_dist
+        tp3 = entry + sign * tp3_dist
+
+        if action == "BUY":
+            if not (tp1 > entry and tp2 > tp1 and tp3 > tp2 and sl_price < entry):
+                return None
+        else:
+            if not (tp1 < entry and tp2 < tp1 and tp3 < tp2 and sl_price > entry):
+                return None
+
+        if abs(tp1 - entry) >= abs(sl_price - entry) * 1.5:
+            return None
+        if abs(tp3 - entry) > 3.0 * atr:
+            return None
+        for val in (sl_price, tp1, tp2, tp3):
+            if val in (None, 0):
+                return None
+
+        return (
+            round(sl_price, 2),
+            round(tp1, 2),
+            round(tp2, 2),
+            round(tp3, 2),
+        )
 
     def _is_15m_bullish(self, df_15m) -> bool:
         """Check if 15m timeframe is bullish."""

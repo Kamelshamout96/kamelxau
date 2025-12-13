@@ -6,7 +6,7 @@ plus decision aggregation, duplicate prevention, fallback light mode, and emits 
 from __future__ import annotations
 
 from typing import Any, Dict
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 
 from .bias_engine import BiasEngine
 from .duplicate_prevention_engine import DuplicatePreventionEngine
@@ -22,6 +22,9 @@ from .momentum_breakout_layer import MomentumBreakoutLayer
 from .momentum_breakout_buy_engine import MomentumBreakoutBuyEngine
 from .price_action_analyst_layer import PriceActionAnalystLayer
 from .human_scalper_layer import HumanScalperLayer
+from .utils import isMarketOpen, send_telegram
+
+RIYADH_TZ = timezone(timedelta(hours=3))
 
 
 class FinalSignalEngine:
@@ -45,6 +48,8 @@ class FinalSignalEngine:
         self.session_direction = None
         self.session_day = None
         self.last_structure_direction = None
+        self.last_market_open = None
+        self.close_warning_sent = False
         self.fallback_timeout = timedelta(minutes=15)
         self.fallback_timeout_light = timedelta(minutes=2)
         self.layer_weights = {
@@ -74,6 +79,16 @@ class FinalSignalEngine:
         breakout_filter_active = ctx.get("breakout_hh", False)
         last_time = df_5m.index[-1] if len(df_5m) else None
         self._reset_session(last_time)
+
+        now_local = datetime.now(RIYADH_TZ)
+        market_open = self._is_open_market(now_local)
+        minutes_to_close = self._minutes_to_close_riyadh(now_local) if market_open else None
+        self._update_market_state(market_open)
+        if not market_open:
+            return {"action": "NO_TRADE", "reason": "market_closed", "analysis": analysis.context, "discretionary_context": {}}
+        if minutes_to_close is not None and minutes_to_close <= 30:
+            self._maybe_send_close_warning()
+            return {"action": "NO_TRADE", "reason": "market_closing_soon", "analysis": analysis.context, "discretionary_context": {}}
 
         signal_pool, discretionary_ctx = self._collect_candidates(
             df_5m=df_5m,
@@ -232,6 +247,61 @@ class FinalSignalEngine:
             self.session_day = day
             self.session_direction = None
             self.last_structure_direction = None
+
+    def _is_open_market(self, now_local: datetime) -> bool:
+        # Use existing isMarketOpen with UTC conversion; all timestamps originate from Riyadh-local clock
+        now_utc = now_local.astimezone(timezone.utc)
+        return isMarketOpen(now_utc)
+
+    def _update_market_state(self, market_open: bool) -> None:
+        if market_open and self.last_market_open is False:
+            self.close_warning_sent = False
+        self.last_market_open = market_open
+
+    def _maybe_send_close_warning(self) -> None:
+        if self.close_warning_sent:
+            return
+        token = os.getenv("TG_TOKEN")
+        chat = os.getenv("TG_CHAT")
+        msg = "⚠️ Market will close in 30 minutes. New trades are now disabled."
+        try:
+            send_telegram(token, chat, msg)
+        except Exception:
+            pass
+        self.close_warning_sent = True
+
+    def _minutes_to_close_riyadh(self, now_local: datetime) -> float | None:
+        """
+        Minutes to next session close using Riyadh TZ (UTC+3), aligned to CME hours:
+        - Daily break: 01:00 -> 02:00 local
+        - Weekly break: Saturday 01:00 -> Monday 02:00 local
+        """
+        if now_local.tzinfo is None:
+            now_local = now_local.replace(tzinfo=RIYADH_TZ)
+        else:
+            now_local = now_local.astimezone(RIYADH_TZ)
+
+        weekday = now_local.weekday()  # Monday=0
+        hour = now_local.hour
+
+        # Weekly closed window
+        if (weekday == 5 and hour >= 1) or (weekday == 6) or (weekday == 0 and hour < 2):
+            return 0
+        # Daily break closed window
+        if hour == 1:
+            return 0
+
+        # Next daily close at 01:00 local
+        next_close = now_local.replace(hour=1, minute=0, second=0, microsecond=0)
+        if next_close <= now_local:
+            next_close = next_close + timedelta(days=1)
+
+        # If next_close lands in weekly close, treat as closed
+        if (next_close.weekday() == 5 and next_close.hour >= 1) or next_close.weekday() in (6,) or (next_close.weekday() == 0 and next_close.hour < 2):
+            return 0
+
+        delta_minutes = (next_close - now_local).total_seconds() / 60.0
+        return max(delta_minutes, 0)
 
     def _collect_candidates(self, df_5m, df_15m, ctx, bias, breakout_filter_active, last_time, analysis_ctx):
         signal_pool = []
